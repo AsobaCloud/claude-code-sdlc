@@ -4,16 +4,21 @@ source "$(dirname "$0")/common.sh"
 init_hook
 
 FILE_PATH=$(tool_input file_path)
+[[ -z "$FILE_PATH" ]] && FILE_PATH=$(tool_input notebook_path)
 
-# Always allow writes to plan files (plan mode needs this)
+# Always allow writes to: plan files, SEP files, Claude memory files
 if [[ "$FILE_PATH" == *"/.claude/plans/"* ]]; then
+    exit 0
+fi
+if [[ "$FILE_PATH" == *"/.sep/"* ]]; then
+    exit 0
+fi
+if [[ "$FILE_PATH" == *"/.claude/projects/"*"/memory/"* ]]; then
     exit 0
 fi
 
 # ── Check approval ──
 if ! state_exists approved; then
-    # Check if a plan file already exists — guide model to re-approve it
-    # instead of starting a fresh EnterPlanMode cycle (which clears persist)
     EXISTING_PLAN=""
     for pf in "${HOME}/.claude/plans/"*.md; do
         [[ -f "$pf" ]] && EXISTING_PLAN="$pf" && break
@@ -23,25 +28,16 @@ if ! state_exists approved; then
         deny_tool "BLOCKED: No approved plan for this work.
 
 A plan file exists at: ${EXISTING_PLAN}
-If this plan is current, call ExitPlanMode to get it approved.
-If you need a different plan, call EnterPlanMode first.
 
-DO NOT bypass. DO NOT create markers directly."
+NEXT ACTION: Call ExitPlanMode to get it approved.
+If you need a different plan, call EnterPlanMode first."
     else
         deny_tool "BLOCKED: No approved plan for this work.
 
-REQUIRED WORKFLOW:
-  1. EnterPlanMode    → Enter planning mode
-  2. [explore]        → Read code, understand patterns
-  3. [write plan]     → Document your approach
-  4. ExitPlanMode     → Present plan for user approval
-  5. [user approves]  → You can now edit files
+NEXT ACTION: Call EnterPlanMode to start planning.
+Then: explore code → write plan → call ExitPlanMode for approval.
 
-Approval persists until you type /accept or /reject.
-If you already had approval,
-ask the user to run: ~/.claude/scripts/restore_approval.sh
-
-DO NOT bypass. DO NOT create markers directly."
+If you already had approval, ask the user to type /approve."
     fi
 fi
 

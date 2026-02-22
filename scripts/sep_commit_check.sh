@@ -22,4 +22,6 @@ fi
 
 deny_tool "BLOCKED: git commit must reference a SEP issue in the commit message.
 Include 'SEP-NNN' in your commit message (e.g., 'SEP-012: Add batch size config').
-If no SEP exists, create one first: ~/.claude/scripts/sep_create.sh"
+
+NEXT ACTION: If no SEP exists, create one first:
+  ~/.claude/scripts/sep_create.sh \"title\" \"summary\" \"motivation\" \"change\" \"criteria\""

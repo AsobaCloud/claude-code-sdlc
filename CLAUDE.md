@@ -1,5 +1,27 @@
 # Rules
 
+## Epistemology
+
+ALWAYS WEIGH OBJECTIVE EVIDENCE ABOVE AND BEYOND YOUR INTERNAL KNOWLEDGE.
+WHEN IN CONFLICT WITH ACTUAL DOCUMENTARY EVIDENCE, YOUR TRAINING IS WRONG.
+
+When you read documentation, code, or error messages: parse what is actually written,
+not what you expect to see based on pattern-matching from training data. If a script
+does X, it does X — not what similar scripts in your training corpus did.
+
+Treat your training knowledge as an unreliable prior. It is a starting heuristic, not
+a source of truth. Every factual claim you make from training — about how an API works,
+what a config option does, whether a feature exists — must be corroborated by evidence
+from the actual codebase, documentation, or runtime behavior before you act on it. If
+you cannot find corroboration, say so explicitly rather than proceeding on assumption.
+
+Name the failure mode: when you read evidence that contradicts your training-based
+assumption, you will feel pull toward dismissing the evidence, reinterpreting it to fit
+your prior, or acknowledging it verbally while continuing to act on the old assumption.
+This is the single most dangerous failure pattern you have. When you notice a conflict
+between what you assumed and what the evidence says, STOP, discard the assumption, and
+rebuild your understanding from the evidence alone.
+
 ## First Action Protocol
 When you receive ANY request that will involve code changes, your FIRST actions — before
 thinking about solutions — MUST be:
@@ -28,12 +50,18 @@ Every plan MUST include these enforced sections:
 - `## Scope` — Every file that will be modified, one per line as `- path/to/file.ext`
 - `## Success Criteria` — How to verify the task is done (≥ 10 words)
 - `## Justification` — Why this approach, citing project docs (existing requirement)
+- `## Validation` — Evidence the plan is grounded in reality, not pattern-matched:
+  - What sources did you consult? (specific files, docs, URLs — not "I read the code")
+  - For each proposed fix: what specific evidence supports it working?
+  - What is verified vs. assumed? State confidence explicitly.
+  - What are the known gaps — what does the fix NOT cover?
+  - For architecture changes: cite ≥2 external sources (NOT the codebase) to validate approach.
 
 The Scope section is enforced: edits to files not listed will be BLOCKED.
 
 Every plan MUST reference a SEP issue (e.g., "Implements SEP-003") unless the project
-has a `.sep-exempt` marker. If no SEP exists, create one during planning using
-`~/.claude/scripts/sep_helpers.sh`.
+has a `.sep-exempt` marker. If no SEP exists, create one during planning via Bash:
+`~/.claude/scripts/sep_create.sh "title" "summary" "motivation" "change" "criteria"`
 
 ## UI Changes Require ASCII Mockups
 When a plan involves ANY visual/UI change, the plan MUST include an ASCII mockup
@@ -54,56 +82,41 @@ When something doesn't work, DO NOT immediately jump to code changes:
 ## Hook System - ENFORCED WORKFLOW
 
 Hooks **BLOCK Edit/Write/NotebookEdit** until plan approval.
-Hooks **BLOCK ExitPlanMode** if exploration or plan quality is insufficient.
-Approval **persists across sessions** (project-scoped) until explicitly cleared.
-
-### State Machine
-
-```
-[No Approval] ──EnterPlanMode──► [Planning] ──ExitPlanMode──► [Approved/Implementing]
-      ^                                                              │
-      │                                              clear_approval.sh (model runs when done)
-      │                                                              │
-      │                                              /accept, /reject, or EnterPlanMode
-      │                                                              │
-      └──────────────────────────────────────────────────────────────┘
-```
-
-Approval is set by:
-- `ExitPlanMode` — user accepts the plan → editing unlocked immediately
-
-Approval is cleared by:
-- `~/.claude/scripts/clear_approval.sh` — model runs this after implementation is complete (HARD LOCK)
-- `/accept` — user accepts the implementation (command)
-- `/reject` — user rejects; must re-plan (command)
-- `EnterPlanMode` — starting a new plan cycle clears the previous one
-
-Approval is stored persistently per project directory. New sessions on the same
-project automatically inherit existing approval state.
+Hooks **BLOCK ExitPlanMode** if plan quality is insufficient.
+Approval is stored **persistently per project directory** (pwd hash). It survives
+session changes, context compaction, and new sessions — no session-scoped state exists.
 
 ### The Workflow
 
-1. `EnterPlanMode` → clears approval, enters planning, starts exploration tracking
-2. Explore codebase: Read docs, Grep/Glob for related code (minimum 3 reads/searches)
-3. Write substantive plan to plan file (50+ words, reference files found)
-4. `ExitPlanMode` → validates exploration + plan quality → plan is approved → editing unlocked. Tell the user: "Plan approved. Starting implementation."
-5. Implement ONLY the changes described in the plan. Every edit injects a scope reminder.
-6. When implementation is complete, run `~/.claude/scripts/clear_approval.sh` to lock further edits. Then tell the user to review and type `/accept` or `/reject`.
+1. `EnterPlanMode` → clears previous approval, enters planning
+2. Explore codebase: Read docs, Grep/Glob for related code
+3. Write substantive plan to plan file (50+ words, all required sections)
+4. `ExitPlanMode` → validates plan quality → approved → editing unlocked
+5. Implement ONLY the changes described in the plan
+6. Run `~/.claude/scripts/clear_approval.sh` → locked. Tell user to `/accept` or `/reject`.
+
+### Writes Allowed During Planning (no approval needed)
+
+- Plan files: `*/.claude/plans/*`
+- SEP files: `*/.sep/*`
+- Memory files: `*/.claude/projects/*/memory/*`
+
+Everything else requires approval.
+
+### When Blocked
+
+**"No approved plan"** → Call `EnterPlanMode` to start planning.
+**"File not in scope"** → Update plan's `## Scope`, call `ExitPlanMode` for re-approval.
+**"Plan quality checks failed"** → Fix the listed issues in plan file, call `ExitPlanMode` again.
+**"git commit must reference SEP"** → Run `~/.claude/scripts/sep_create.sh "title"` via Bash.
 
 ### Emergency escape hatch
 
-If approval is lost or needs manual restore (user runs from project directory):
-```
-~/.claude/scripts/restore_approval.sh
-```
-
-`/approve` also restores approval (**emergency use only** — never part of normal flow).
-In the normal workflow, `ExitPlanMode` creates approval automatically via PreToolUse.
+If approval is lost: user types `/approve` or runs `~/.claude/scripts/restore_approval.sh`
 
 ### What NOT To Do
 
-- DO NOT bypass or work around the block
-- DO NOT create marker files directly
-- DO NOT assume approval has expired — it persists until cleared
+- DO NOT use Bash (tee, echo >) to bypass Write blocks on project files
+- DO NOT create state marker files directly
 - DO NOT make edits after running clear_approval.sh — you are locked out
 - DO NOT make edits beyond what the approved plan describes

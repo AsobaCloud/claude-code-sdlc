@@ -13,15 +13,6 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "Read|Glob|Grep",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "~/.claude/scripts/track_exploration.sh"
-          }
-        ]
-      },
-      {
         "matcher": "Edit|Write|NotebookEdit",
         "hooks": [
           {
@@ -69,17 +60,6 @@
           {
             "type": "command",
             "command": "~/.claude/scripts/clear_plan_on_new_task.sh"
-          }
-        ]
-      }
-    ],
-    "SessionEnd": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "~/.claude/scripts/cleanup_session.sh"
           }
         ]
       }

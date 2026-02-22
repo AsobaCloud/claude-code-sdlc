@@ -1,31 +1,26 @@
 #!/bin/bash
 # PostToolUse hook on ExitPlanMode — idempotent backup for approval creation.
-# NOTE: Primary approval creation now happens in validate_plan_quality.sh (PreToolUse).
-# This PostToolUse hook is retained as an idempotent backup in case PreToolUse
-# creates approval but PostToolUse context is needed for state consistency.
+# Primary approval happens in validate_plan_quality.sh (PreToolUse).
+# This is a safety net for state consistency.
 source "$(dirname "$0")/common.sh"
 init_hook
 
-# ── Create approval markers (session + persistent) ──
+# Ensure approval is set (idempotent — validate_plan_quality.sh already did this)
 state_write approved "1"
-persist_write approved "1"
 
-# ── Extract objective, scope, criteria from validated plan ──
+# Re-extract plan sections if plan_file is known
 PLAN_FILE=$(state_read plan_file)
 
 if [[ -n "$PLAN_FILE" && -f "$PLAN_FILE" ]]; then
     PLAN_CONTENT=$(cat "$PLAN_FILE" 2>/dev/null)
 
-    # Extract Objective
     OBJ=$(echo "$PLAN_CONTENT" \
         | sed -n '/^##[[:space:]]*[Oo]bjective/,/^##/p' \
         | tail -n +2 | grep -v '^## ' \
         | sed '/^[[:space:]]*$/d' \
         | head -3)
-    echo "$OBJ" > "$(state_file objective)"
-    echo "$OBJ" > "$(persist_file objective)"
+    state_write objective "$OBJ"
 
-    # Extract Scope
     SCOPE=$(echo "$PLAN_CONTENT" \
         | sed -n '/^##[[:space:]]*[Ss]cope/,/^##/p' \
         | tail -n +2 | grep -v '^## ' \
@@ -34,25 +29,17 @@ if [[ -n "$PLAN_FILE" && -f "$PLAN_FILE" ]]; then
         | sed 's/^[[:space:]]*-[[:space:]]*//' \
         | sed 's/[[:space:]]*$//' \
         | sed 's/`//g')
-    echo "$SCOPE" > "$(state_file scope)"
-    echo "$SCOPE" > "$(persist_file scope)"
+    state_write scope "$SCOPE"
 
-    # Extract Success Criteria
     CRIT=$(echo "$PLAN_CONTENT" \
         | sed -n '/^##[[:space:]]*[Ss]uccess[[:space:]]*[Cc]riteria/,/^##/p' \
         | tail -n +2 | grep -v '^## ' \
         | sed '/^[[:space:]]*$/d' \
         | head -3)
-    echo "$CRIT" > "$(state_file criteria)"
-    echo "$CRIT" > "$(persist_file criteria)"
+    state_write criteria "$CRIT"
 fi
 
-# Clean up planning state (session + persistent)
+# Clean up planning state
 state_remove planning
-state_remove explore_count
-state_remove exploration_log
-persist_remove planning
-persist_remove explore_count
-persist_remove exploration_log
 
 allow_with_context "Plan approved. Editing unlocked. Implement ONLY the approved changes. When done, run ~/.claude/scripts/clear_approval.sh then tell the user to /accept or /reject." "PostToolUse"

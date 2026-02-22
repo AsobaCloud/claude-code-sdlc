@@ -1,9 +1,9 @@
 #!/bin/bash
-# SessionStart hook — remove stale session dirs and legacy flat files (>6hrs old)
+# SessionStart hook — clean up legacy state from old session-scoped architecture
 
-# Clean new-style session directories
+# Remove old session directories (no longer used — state is persist-only now)
 if [[ -d /tmp/.claude_hooks ]]; then
-    find /tmp/.claude_hooks -mindepth 1 -maxdepth 1 -type d -mmin +360 -exec rm -rf {} + 2>/dev/null
+    find /tmp/.claude_hooks -mindepth 1 -maxdepth 1 -type d -exec rm -rf {} + 2>/dev/null
 fi
 
 # Clean legacy flat files from old hook system

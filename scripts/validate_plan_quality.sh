@@ -1,23 +1,12 @@
 #!/bin/bash
-# PreToolUse hook on ExitPlanMode — quality gate (validation only, NO marker creation)
+# PreToolUse hook on ExitPlanMode — quality gate + approval creation
+# All state is persist-only (no session-scoped state).
 source "$(dirname "$0")/common.sh"
 init_hook
 
 ERRORS=""
 
-# ── Check 1: Exploration depth ──
-EXPLORE_COUNT=$(state_read explore_count)
-EXPLORE_COUNT="${EXPLORE_COUNT:-0}"
-if [[ "$EXPLORE_COUNT" -lt 3 ]]; then
-    ERRORS+="INSUFFICIENT EXPLORATION: $EXPLORE_COUNT reads/searches (minimum 3).
-  - Read project documentation (CLAUDE.md, docs/*.md, README)
-  - Search for existing code related to the change (Grep/Glob)
-  - Read the specific files you plan to modify
-
-"
-fi
-
-# ── Check 2: Find plan file ──
+# ── Check 1: Find plan file ──
 PLAN_FILE=""
 NEWEST_TIME=0
 
@@ -34,14 +23,17 @@ done
 
 if [[ -z "$PLAN_FILE" ]]; then
     deny_tool "BLOCKED: No plan file found in ~/.claude/plans/ or .claude/plans/
-Write your plan to a .md file in the plans directory before calling ExitPlanMode."
+
+NEXT ACTION: Write your plan to a .md file in the plans directory, then call ExitPlanMode."
 fi
 
 # Check staleness (4 hours)
 AGE=$(( $(date +%s) - NEWEST_TIME ))
 if [[ "$AGE" -gt 14400 ]]; then
     ERRORS+="STALE PLAN: $(( AGE / 60 )) minutes old (max 240).
-  File: $PLAN_FILE — update it, then try ExitPlanMode again.
+  File: $PLAN_FILE
+
+  NEXT ACTION: Update the plan file, then call ExitPlanMode again.
 
 "
 fi
@@ -49,30 +41,29 @@ fi
 # Read plan content
 PLAN_CONTENT=$(cat "$PLAN_FILE" 2>/dev/null)
 
-# ── Check 3: Word count ──
+# ── Check 2: Word count ──
 WORD_COUNT=$(echo "$PLAN_CONTENT" | wc -w | tr -d ' ')
 if [[ "$WORD_COUNT" -lt 50 ]]; then
     ERRORS+="PLAN TOO THIN: $WORD_COUNT words (minimum 50).
-  Add detail: what docs you read, what code you found, what files change.
 
 "
 fi
 
-# ── Check 4: File path references ──
+# ── Check 3: File path references ──
 if ! echo "$PLAN_CONTENT" | grep -qE '\.[a-zA-Z]{2,5}\b'; then
     ERRORS+="NO FILE REFERENCES: Plan must reference specific files (e.g., scripts/foo.sh).
 
 "
 fi
 
-# ── Check 5: Exploration evidence ──
+# ── Check 4: Exploration evidence ──
 if ! echo "$PLAN_CONTENT" | grep -qiE '(existing|found|pattern|readme|documentation|current|already|currently)'; then
     ERRORS+="NO EXPLORATION EVIDENCE: Reference what you found in the codebase.
 
 "
 fi
 
-# ── Check 6: Required sections ──
+# ── Check 5: Required sections ──
 
 # Objective
 if ! echo "$PLAN_CONTENT" | grep -qiE '^##\s+Objective'; then
@@ -127,7 +118,7 @@ if ! echo "$PLAN_CONTENT" | grep -qiE '^##\s+Justification'; then
 else
     JUST_CONTENT=$(echo "$PLAN_CONTENT" | sed -n '/^##[[:space:]]*[Jj]ustification/,/^##/p' | head -50 | tail -n +2 | grep -v '^## ')
 
-    if ! echo "$JUST_CONTENT" | grep -qE '(docs/|scripts/|tools/|assets/|scenes/|CLAUDE\.md|README|\.gd|\.md|\.tscn|\.tres|\.sh|\.json)'; then
+    if ! echo "$JUST_CONTENT" | grep -qE '(docs/|scripts/|tools/|assets/|scenes/|CLAUDE\.md|README|\.gd|\.md|\.tscn|\.tres|\.sh|\.json|\.py|\.js|\.ts)'; then
         ERRORS+="## Justification has no project file citations.
 
 "
@@ -140,40 +131,45 @@ else
     fi
 fi
 
-# ── Check 7: Cross-reference exploration log ──
-if state_exists exploration_log; then
-    # Extract basenames from READ entries (format: "READ: /path/to/file")
-    READ_BASENAMES=$(grep '^READ:' "$(state_file exploration_log)" | sed 's/^READ:[[:space:]]*//' | xargs -I{} basename {} 2>/dev/null)
-    # Extract basenames from SEARCH entries (format: "SEARCH: pattern | /path")
-    SEARCH_BASENAMES=$(grep '^SEARCH:' "$(state_file exploration_log)" | sed 's/^SEARCH:.*|[[:space:]]*//' | xargs -I{} basename {} 2>/dev/null)
-    # Combine and deduplicate
-    EXPLORED_FILES=$(printf '%s\n%s' "$READ_BASENAMES" "$SEARCH_BASENAMES" | sort -u)
-    if [[ -n "$EXPLORED_FILES" ]]; then
-        MATCH_COUNT=0
-        while IFS= read -r BASENAME; do
-            [[ -z "$BASENAME" ]] && continue
-            NAME_NO_EXT="${BASENAME%.*}"
-            if echo "$PLAN_CONTENT" | grep -qF "$BASENAME" || echo "$PLAN_CONTENT" | grep -qF "$NAME_NO_EXT"; then
-                MATCH_COUNT=$(( MATCH_COUNT + 1 ))
-            fi
-        done <<< "$EXPLORED_FILES"
+# Validation
+if ! echo "$PLAN_CONTENT" | grep -qiE '^##\s+Validation'; then
+    ERRORS+="MISSING ## Validation section. Every plan must answer:
+  - What sources did you consult? (specific files, docs, URLs)
+  - For each fix: what evidence supports it? (causal link, not vibes)
+  - What is verified vs. assumed?
+  - What are the known gaps?
+  - For architecture changes: cite ≥2 external sources (not codebase).
 
-        if [[ "$MATCH_COUNT" -lt 2 ]]; then
-            ERRORS+="Plan references only $MATCH_COUNT explored file(s) (minimum 2).
-  Update your plan to reference files you actually read.
+"
+else
+    VAL_CONTENT=$(echo "$PLAN_CONTENT" | sed -n '/^##[[:space:]]*[Vv]alidation/,/^##/p' | head -50 | tail -n +2 | grep -v '^## ')
+    VAL_WORDS=$(echo "$VAL_CONTENT" | wc -w | tr -d ' ')
+    if [[ "$VAL_WORDS" -lt 20 ]]; then
+        ERRORS+="## Validation too short ($VAL_WORDS words, minimum 20).
+
+"
+    fi
+
+    # Architecture changes need external sources
+    if echo "$PLAN_CONTENT" | grep -qiE '(architect|refactor|redesign|restructure|migrate|rewrite|eliminate.*state|single source of truth)'; then
+        EXT_SOURCES=$(echo "$VAL_CONTENT" | grep -ciE '(http|docs\.|documentation|spec|RFC|official|reference|per .*docs)')
+        if [[ "$EXT_SOURCES" -lt 2 ]]; then
+            ERRORS+="## Validation: Architecture change detected but <2 external source citations.
+  Consult official docs, specs, or references outside the codebase to validate your approach.
 
 "
         fi
     fi
 fi
 
-# ── Check 8: SEP issue reference (skip for exempt projects) ──
+# ── Check 6: SEP issue reference (skip for exempt projects) ──
 if [[ ! -f "${CLAUDE_PROJECT_DIR:-.}/.sep-exempt" ]]; then
     SEP_REF=$(echo "$PLAN_CONTENT" | grep -oE 'SEP-[0-9]+' | head -1)
     if [[ -z "$SEP_REF" ]]; then
         ERRORS+="NO SEP REFERENCE: Plan must reference a SEP issue (e.g., 'Implements SEP-003').
-  Create one with: run ~/.claude/scripts/sep_create.sh from the project directory.
-  Or add 'SEP-NNN' to your plan's Objective section.
+
+  NEXT ACTION: Run ~/.claude/scripts/sep_create.sh \"title\" to create one,
+  then add 'SEP-NNN' to your plan's Objective section.
 
 "
     fi
@@ -183,13 +179,12 @@ fi
 if [[ -n "$ERRORS" ]]; then
     deny_tool "BLOCKED: Plan quality checks failed.
 
-${ERRORS}Fix all issues above, then try ExitPlanMode again."
+${ERRORS}NEXT ACTION: Fix all issues above in your plan file, then call ExitPlanMode again."
 fi
 
 # ── All checks passed — create approval and extract plan sections ──
 state_write plan_file "$PLAN_FILE"
 state_write approved "1"
-persist_write approved "1"
 
 # Extract Objective
 OBJ=$(echo "$PLAN_CONTENT" \
@@ -197,8 +192,7 @@ OBJ=$(echo "$PLAN_CONTENT" \
     | tail -n +2 | grep -v '^## ' \
     | sed '/^[[:space:]]*$/d' \
     | head -3)
-echo "$OBJ" > "$(state_file objective)"
-echo "$OBJ" > "$(persist_file objective)"
+state_write objective "$OBJ"
 
 # Extract Scope
 SCOPE=$(echo "$PLAN_CONTENT" \
@@ -209,8 +203,7 @@ SCOPE=$(echo "$PLAN_CONTENT" \
     | sed 's/^[[:space:]]*-[[:space:]]*//' \
     | sed 's/[[:space:]]*$//' \
     | sed 's/`//g')
-echo "$SCOPE" > "$(state_file scope)"
-echo "$SCOPE" > "$(persist_file scope)"
+state_write scope "$SCOPE"
 
 # Extract Success Criteria
 CRIT=$(echo "$PLAN_CONTENT" \
@@ -218,15 +211,9 @@ CRIT=$(echo "$PLAN_CONTENT" \
     | tail -n +2 | grep -v '^## ' \
     | sed '/^[[:space:]]*$/d' \
     | head -3)
-echo "$CRIT" > "$(state_file criteria)"
-echo "$CRIT" > "$(persist_file criteria)"
+state_write criteria "$CRIT"
 
-# Clean up planning state (session + persistent)
+# Clean up planning state
 state_remove planning
-state_remove explore_count
-state_remove exploration_log
-persist_remove planning
-persist_remove explore_count
-persist_remove exploration_log
 
-allow_with_context "Plan approved. Editing unlocked. Implement ONLY the approved changes."
+allow_with_context "Plan approved. Editing unlocked. Implement ONLY the approved changes. When done, run ~/.claude/scripts/clear_approval.sh then tell the user to /accept or /reject."
