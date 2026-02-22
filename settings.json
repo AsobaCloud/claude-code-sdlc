@@ -45,6 +45,10 @@
           {
             "type": "command",
             "command": "~/.claude/scripts/guard_destructive_bash.sh"
+          },
+          {
+            "type": "command",
+            "command": "~/.claude/scripts/sep_commit_check.sh"
           }
         ]
       }

@@ -158,6 +158,12 @@ json_posttooluse() {
         '{"session_id":"test-session-001","tool_name":$tool,"tool_input":{}}'
 }
 
+json_bash_pretooluse() {
+    local command="$1"
+    jq -n --arg cmd "$command" \
+        '{"session_id":"test-session-001","tool_name":"Bash","tool_input":{"command":$cmd}}'
+}
+
 # ══════════════════════════════════════════════════════════════════
 # GROUP 1: init_hook / env-var overrides
 # ══════════════════════════════════════════════════════════════════
@@ -182,8 +188,8 @@ setup
 echo "1" > "${CLAUDE_TEST_PERSIST_DIR}/approved"
 run_hook "${SCRIPTS_DIR}/require_plan_approval.sh" "$(json_pretooluse Edit /some/file.sh)"
 # If PERSIST_DIR is used, hydration will copy approved to STATE_DIR,
-# and the script won't deny
-assert_output_not_contains "permissionDecision" && pass
+# and the script won't deny (it will allow_with_context instead)
+assert_output_not_contains '"deny"' && pass
 teardown
 
 # 1.3 Missing session_id with CLAUDE_TEST_STATE_DIR set → script still runs
@@ -607,6 +613,199 @@ assert_output_contains "EnterPlanMode" && pass
 for bak in "${HOME}/.claude/plans/"*.test_bak; do
     [[ -f "$bak" ]] && mv "$bak" "${bak%.test_bak}"
 done
+teardown
+
+# 7.8 PreToolUse approval creation (validate_plan_quality.sh creates approval directly)
+begin_test "7.8 validate_plan_quality creates approval in PreToolUse"
+setup
+VALIDATE="${SCRIPTS_DIR}/validate_plan_quality.sh"
+# Set up planning state with sufficient exploration
+echo "1" > "${CLAUDE_TEST_STATE_DIR}/planning"
+echo "5" > "${CLAUDE_TEST_STATE_DIR}/explore_count"
+# Create exploration log referencing files mentioned in plan
+echo "READ: /some/validate_plan_quality.sh" > "${CLAUDE_TEST_STATE_DIR}/exploration_log"
+echo "READ: /some/approve_plan.sh" >> "${CLAUDE_TEST_STATE_DIR}/exploration_log"
+echo "SEARCH: hooks | /some/scripts" >> "${CLAUDE_TEST_STATE_DIR}/exploration_log"
+# Also persist planning state (for hydration)
+echo "1" > "${CLAUDE_TEST_PERSIST_DIR}/planning"
+echo "5" > "${CLAUDE_TEST_PERSIST_DIR}/explore_count"
+# Create a valid plan file directly in ~/.claude/plans/
+TEMP_PLAN="${HOME}/.claude/plans/_test_plan_78.md"
+cat > "$TEMP_PLAN" <<'PLAN'
+# Test Plan SEP-001
+
+## Objective
+Fix the approval workflow so validate_plan_quality creates approval markers directly in PreToolUse.
+
+## Scope
+- ~/.claude/scripts/validate_plan_quality.sh
+- ~/.claude/scripts/approve_plan.sh
+
+## Success Criteria
+After ExitPlanMode passes validation, approved marker exists in both session and persistent state.
+
+## Justification
+Per CLAUDE.md workflow documentation, ExitPlanMode should unlock editing immediately. This follows existing patterns in scripts/.
+PLAN
+# Run the validation hook (PreToolUse on ExitPlanMode)
+run_hook "$VALIDATE" "$(json_pretooluse ExitPlanMode)"
+rm -f "$TEMP_PLAN"
+# Verify approval was created by PreToolUse (not PostToolUse)
+assert_file_exists "${CLAUDE_TEST_STATE_DIR}/approved" "state/approved created by PreToolUse" \
+    && assert_file_exists "${CLAUDE_TEST_PERSIST_DIR}/approved" "persist/approved created by PreToolUse" \
+    && assert_file_exists "${CLAUDE_TEST_STATE_DIR}/objective" "state/objective extracted" \
+    && assert_file_exists "${CLAUDE_TEST_STATE_DIR}/scope" "state/scope extracted" \
+    && assert_file_exists "${CLAUDE_TEST_STATE_DIR}/criteria" "state/criteria extracted" \
+    && assert_file_missing "${CLAUDE_TEST_STATE_DIR}/planning" "planning cleaned up" \
+    && assert_file_missing "${CLAUDE_TEST_STATE_DIR}/explore_count" "explore_count cleaned up" \
+    && assert_output_not_contains "/approve" \
+    && assert_output_contains "Editing unlocked" \
+    && pass
+teardown
+
+# ══════════════════════════════════════════════════════════════════
+# GROUP 8: SEP commit check (sep_commit_check.sh)
+# ══════════════════════════════════════════════════════════════════
+printf "\n${YELLOW}── Group 8: sep_commit_check.sh ──${NC}\n"
+
+SEP_CHECK="${SCRIPTS_DIR}/sep_commit_check.sh"
+
+# 8.1 git commit without SEP reference → deny
+begin_test "8.1 git commit without SEP ref → deny"
+setup
+run_hook "$SEP_CHECK" "$(json_bash_pretooluse "git commit -m 'fix a bug'")"
+if assert_json_field '.hookSpecificOutput.permissionDecision' 'deny'; then
+    pass
+fi
+teardown
+
+# 8.2 git commit with SEP reference → allow
+begin_test "8.2 git commit with SEP-001 in message → allow"
+setup
+run_hook "$SEP_CHECK" "$(json_bash_pretooluse "git commit -m 'SEP-001: fix a bug'")"
+assert_exit_code 0 && assert_output_not_contains '"deny"' && pass
+teardown
+
+# 8.3 git commit on exempt project → allow
+begin_test "8.3 git commit on .sep-exempt project → allow"
+setup
+# Create .sep-exempt in current directory
+touch "${CLAUDE_PROJECT_DIR:-.}/.sep-exempt" 2>/dev/null || touch ".sep-exempt"
+run_hook "$SEP_CHECK" "$(json_bash_pretooluse "git commit -m 'no sep needed'")"
+assert_exit_code 0 && assert_output_not_contains '"deny"' && pass
+rm -f "${CLAUDE_PROJECT_DIR:-.}/.sep-exempt" 2>/dev/null; rm -f ".sep-exempt"
+teardown
+
+# 8.4 Non-git-commit Bash command → allow
+begin_test "8.4 Non-git-commit command → allow"
+setup
+run_hook "$SEP_CHECK" "$(json_bash_pretooluse "ls -la /tmp")"
+assert_exit_code 0 && assert_output_not_contains '"deny"' && pass
+teardown
+
+# ══════════════════════════════════════════════════════════════════
+# GROUP 9: SEP validation in plan quality
+# ══════════════════════════════════════════════════════════════════
+printf "\n${YELLOW}── Group 9: SEP plan validation ──${NC}\n"
+
+VALIDATE="${SCRIPTS_DIR}/validate_plan_quality.sh"
+
+# 9.1 Plan without SEP reference on non-exempt project → deny
+begin_test "9.1 Plan without SEP ref → deny"
+setup
+echo "1" > "${CLAUDE_TEST_STATE_DIR}/planning"
+echo "5" > "${CLAUDE_TEST_STATE_DIR}/explore_count"
+echo "READ: /some/readme.md" > "${CLAUDE_TEST_STATE_DIR}/exploration_log"
+echo "READ: /some/main.sh" >> "${CLAUDE_TEST_STATE_DIR}/exploration_log"
+echo "SEARCH: hooks | /some/dir" >> "${CLAUDE_TEST_STATE_DIR}/exploration_log"
+echo "1" > "${CLAUDE_TEST_PERSIST_DIR}/planning"
+TEMP_PLAN="${HOME}/.claude/plans/_test_plan_91.md"
+cat > "$TEMP_PLAN" <<'PLAN'
+# No SEP Reference Plan
+
+## Objective
+Fix the readme file to have correct documentation for the existing project.
+
+## Scope
+- ~/project/readme.md
+- ~/project/main.sh
+
+## Success Criteria
+The readme accurately describes the project and all sections are complete.
+
+## Justification
+Per CLAUDE.md documentation requirements. This follows existing patterns in scripts/.
+PLAN
+# Remove any .sep-exempt to ensure check runs
+rm -f "${CLAUDE_PROJECT_DIR:-.}/.sep-exempt" 2>/dev/null
+run_hook "$VALIDATE" "$(json_pretooluse ExitPlanMode)"
+rm -f "$TEMP_PLAN"
+assert_output_contains "NO SEP REFERENCE" && pass
+teardown
+
+# 9.2 Plan with SEP reference → pass (no SEP error)
+begin_test "9.2 Plan with SEP-005 ref → no SEP error"
+setup
+echo "1" > "${CLAUDE_TEST_STATE_DIR}/planning"
+echo "5" > "${CLAUDE_TEST_STATE_DIR}/explore_count"
+echo "READ: /some/validate_plan_quality.sh" > "${CLAUDE_TEST_STATE_DIR}/exploration_log"
+echo "READ: /some/approve_plan.sh" >> "${CLAUDE_TEST_STATE_DIR}/exploration_log"
+echo "SEARCH: hooks | /some/scripts" >> "${CLAUDE_TEST_STATE_DIR}/exploration_log"
+echo "1" > "${CLAUDE_TEST_PERSIST_DIR}/planning"
+TEMP_PLAN="${HOME}/.claude/plans/_test_plan_92.md"
+cat > "$TEMP_PLAN" <<'PLAN'
+# Fix Plan SEP-005
+
+## Objective
+Fix the approval workflow per SEP-005 to validate plan quality in the existing codebase.
+
+## Scope
+- ~/.claude/scripts/validate_plan_quality.sh
+- ~/.claude/scripts/approve_plan.sh
+
+## Success Criteria
+After ExitPlanMode, approved marker exists and editing is unlocked without manual intervention.
+
+## Justification
+Per CLAUDE.md workflow documentation. This follows existing patterns in scripts/.
+PLAN
+run_hook "$VALIDATE" "$(json_pretooluse ExitPlanMode)"
+rm -f "$TEMP_PLAN"
+assert_output_not_contains "NO SEP REFERENCE" && pass
+teardown
+
+# 9.3 Plan on exempt project without SEP → pass (no SEP error)
+begin_test "9.3 Exempt project: no SEP needed → pass"
+setup
+echo "1" > "${CLAUDE_TEST_STATE_DIR}/planning"
+echo "5" > "${CLAUDE_TEST_STATE_DIR}/explore_count"
+echo "READ: /some/readme.md" > "${CLAUDE_TEST_STATE_DIR}/exploration_log"
+echo "READ: /some/main.sh" >> "${CLAUDE_TEST_STATE_DIR}/exploration_log"
+echo "SEARCH: hooks | /some/dir" >> "${CLAUDE_TEST_STATE_DIR}/exploration_log"
+echo "1" > "${CLAUDE_TEST_PERSIST_DIR}/planning"
+TEMP_PLAN="${HOME}/.claude/plans/_test_plan_93.md"
+cat > "$TEMP_PLAN" <<'PLAN'
+# No SEP Plan on Exempt Project
+
+## Objective
+Fix the readme file to have correct documentation for the existing project.
+
+## Scope
+- ~/project/readme.md
+- ~/project/main.sh
+
+## Success Criteria
+The readme accurately describes the project and all sections are complete.
+
+## Justification
+Per CLAUDE.md documentation requirements. This follows existing patterns in scripts/.
+PLAN
+# Create .sep-exempt to mark as exempt
+touch "${CLAUDE_PROJECT_DIR:-.}/.sep-exempt" 2>/dev/null || touch ".sep-exempt"
+run_hook "$VALIDATE" "$(json_pretooluse ExitPlanMode)"
+rm -f "$TEMP_PLAN"
+rm -f "${CLAUDE_PROJECT_DIR:-.}/.sep-exempt" 2>/dev/null; rm -f ".sep-exempt"
+assert_output_not_contains "NO SEP REFERENCE" && pass
 teardown
 
 # ══════════════════════════════════════════════════════════════════

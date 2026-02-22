@@ -1,6 +1,8 @@
 #!/bin/bash
-# PostToolUse hook on ExitPlanMode — SOLE approval marker creator
-# Writes to both session state and persistent project state
+# PostToolUse hook on ExitPlanMode — idempotent backup for approval creation.
+# NOTE: Primary approval creation now happens in validate_plan_quality.sh (PreToolUse).
+# This PostToolUse hook is retained as an idempotent backup in case PreToolUse
+# creates approval but PostToolUse context is needed for state consistency.
 source "$(dirname "$0")/common.sh"
 init_hook
 
@@ -53,5 +55,4 @@ persist_remove planning
 persist_remove explore_count
 persist_remove exploration_log
 
-echo "Plan approved. Editing unlocked. Implement ONLY the approved changes. When done, run ~/.claude/scripts/clear_approval.sh then tell the user to /accept or /reject."
-exit 0
+allow_with_context "Plan approved. Editing unlocked. Implement ONLY the approved changes. When done, run ~/.claude/scripts/clear_approval.sh then tell the user to /accept or /reject." "PostToolUse"

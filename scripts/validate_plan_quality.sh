@@ -37,10 +37,10 @@ if [[ -z "$PLAN_FILE" ]]; then
 Write your plan to a .md file in the plans directory before calling ExitPlanMode."
 fi
 
-# Check staleness (30 min)
+# Check staleness (4 hours)
 AGE=$(( $(date +%s) - NEWEST_TIME ))
-if [[ "$AGE" -gt 1800 ]]; then
-    ERRORS+="STALE PLAN: $(( AGE / 60 )) minutes old (max 30).
+if [[ "$AGE" -gt 14400 ]]; then
+    ERRORS+="STALE PLAN: $(( AGE / 60 )) minutes old (max 240).
   File: $PLAN_FILE — update it, then try ExitPlanMode again.
 
 "
@@ -167,6 +167,18 @@ if state_exists exploration_log; then
     fi
 fi
 
+# ── Check 8: SEP issue reference (skip for exempt projects) ──
+if [[ ! -f "${CLAUDE_PROJECT_DIR:-.}/.sep-exempt" ]]; then
+    SEP_REF=$(echo "$PLAN_CONTENT" | grep -oE 'SEP-[0-9]+' | head -1)
+    if [[ -z "$SEP_REF" ]]; then
+        ERRORS+="NO SEP REFERENCE: Plan must reference a SEP issue (e.g., 'Implements SEP-003').
+  Create one with: run ~/.claude/scripts/sep_create.sh from the project directory.
+  Or add 'SEP-NNN' to your plan's Objective section.
+
+"
+    fi
+fi
+
 # ── Emit all errors at once, or pass ──
 if [[ -n "$ERRORS" ]]; then
     deny_tool "BLOCKED: Plan quality checks failed.
@@ -174,8 +186,47 @@ if [[ -n "$ERRORS" ]]; then
 ${ERRORS}Fix all issues above, then try ExitPlanMode again."
 fi
 
-# ── All checks passed — record plan file path for approve_plan.sh ──
+# ── All checks passed — create approval and extract plan sections ──
 state_write plan_file "$PLAN_FILE"
+state_write approved "1"
+persist_write approved "1"
 
-echo "Plan validated. Tell the user: Please enter /approve to unlock plan approval and proceed to implementation. Do NOT select the built-in approval options."
-exit 0
+# Extract Objective
+OBJ=$(echo "$PLAN_CONTENT" \
+    | sed -n '/^##[[:space:]]*[Oo]bjective/,/^##/p' \
+    | tail -n +2 | grep -v '^## ' \
+    | sed '/^[[:space:]]*$/d' \
+    | head -3)
+echo "$OBJ" > "$(state_file objective)"
+echo "$OBJ" > "$(persist_file objective)"
+
+# Extract Scope
+SCOPE=$(echo "$PLAN_CONTENT" \
+    | sed -n '/^##[[:space:]]*[Ss]cope/,/^##/p' \
+    | tail -n +2 | grep -v '^## ' \
+    | grep -E '^\s*-\s+' \
+    | grep '/' \
+    | sed 's/^[[:space:]]*-[[:space:]]*//' \
+    | sed 's/[[:space:]]*$//' \
+    | sed 's/`//g')
+echo "$SCOPE" > "$(state_file scope)"
+echo "$SCOPE" > "$(persist_file scope)"
+
+# Extract Success Criteria
+CRIT=$(echo "$PLAN_CONTENT" \
+    | sed -n '/^##[[:space:]]*[Ss]uccess[[:space:]]*[Cc]riteria/,/^##/p' \
+    | tail -n +2 | grep -v '^## ' \
+    | sed '/^[[:space:]]*$/d' \
+    | head -3)
+echo "$CRIT" > "$(state_file criteria)"
+echo "$CRIT" > "$(persist_file criteria)"
+
+# Clean up planning state (session + persistent)
+state_remove planning
+state_remove explore_count
+state_remove exploration_log
+persist_remove planning
+persist_remove explore_count
+persist_remove exploration_log
+
+allow_with_context "Plan approved. Editing unlocked. Implement ONLY the approved changes."

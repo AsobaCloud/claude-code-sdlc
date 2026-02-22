@@ -31,6 +31,10 @@ Every plan MUST include these enforced sections:
 
 The Scope section is enforced: edits to files not listed will be BLOCKED.
 
+Every plan MUST reference a SEP issue (e.g., "Implements SEP-003") unless the project
+has a `.sep-exempt` marker. If no SEP exists, create one during planning using
+`~/.claude/scripts/sep_helpers.sh`.
+
 ## UI Changes Require ASCII Mockups
 When a plan involves ANY visual/UI change, the plan MUST include an ASCII mockup
 showing the proposed layout BEFORE and AFTER. No UI code without a visual preview.
@@ -93,7 +97,8 @@ If approval is lost or needs manual restore (user runs from project directory):
 ~/.claude/scripts/restore_approval.sh
 ```
 
-`/approve` also restores approval (emergency use only — not part of normal flow).
+`/approve` also restores approval (**emergency use only** — never part of normal flow).
+In the normal workflow, `ExitPlanMode` creates approval automatically via PreToolUse.
 
 ### What NOT To Do
 
