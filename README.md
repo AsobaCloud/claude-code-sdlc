@@ -43,6 +43,17 @@ If any check fails, `ExitPlanMode` is blocked and the model gets a specific erro
 ### Layer 4: Destructive Command Guard
 **Dangerous shell commands are blocked when they'd discard work.** `guard_destructive_bash.sh` intercepts every `Bash` tool call and blocks `git checkout --`, `git reset --hard`, `git clean -f`, and `rm -rf` when they target uncommitted or git-tracked files. The model must ask the user for confirmation before proceeding.
 
+## Claude with this system vs Codex SDLC (as of Feb 24, 2026)
+
+| Dimension | Claude setup | Codex setup |
+|---|---|---|
+| Enforcement type | Hard runtime gates (`PreToolUse`/`PostToolUse`) that can deny tools | Instruction/policy orchestration via `AGENTS.md`; no equivalent local tool-deny hook layer |
+| Plan-before-code | Enforced: blocks `Edit`, `Write`, `NotebookEdit` without approval | Required by policy text, but not mechanically blocked |
+| Scope control | Enforced fail-closed file scope from `## Scope` in approved plan | No local file-scope gate in `.codex` rules |
+| Plan quality gate | Enforced checks: word count, required sections, validation section, SEP reference | Required behavior described in instructions, but no parser/validator gate |
+| Commit governance | Enforced SEP reference on `git commit` Bash commands | No SEP-style commit gate in `.codex` |
+| Command safety | Destructive Bash guard denies risky commands with uncommitted changes | Safety is policy-driven; current `.codex/rules/default.rules` mainly defines a few allow-prefix rules |
+
 ## State Machine
 
 ```
