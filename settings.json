@@ -102,6 +102,15 @@
             "command": "~/.claude/scripts/sep_commit_check.sh"
           }
         ]
+      },
+      {
+        "matcher": "Read|Grep|Glob|Bash|Task|WebFetch|WebSearch",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/scripts/require_investigation_plan.sh"
+          }
+        ]
       }
     ],
     "PostToolUse": [

@@ -12,7 +12,7 @@ if [[ -f "${PERSIST_DIR}/objective" ]]; then
     fi
 fi
 
-# Clear project state
-rm -f "${PERSIST_DIR}/approved" "${PERSIST_DIR}/objective" "${PERSIST_DIR}/scope" "${PERSIST_DIR}/criteria" "${PERSIST_DIR}/plan_file" "${PERSIST_DIR}/planning"
+# Clear project state (including diagnostic_mode)
+rm -f "${PERSIST_DIR}/approved" "${PERSIST_DIR}/objective" "${PERSIST_DIR}/scope" "${PERSIST_DIR}/criteria" "${PERSIST_DIR}/plan_file" "${PERSIST_DIR}/planning" "${PERSIST_DIR}/diagnostic_mode"
 
 echo "Implementation accepted. Plan approval cleared. Ready for next task."
