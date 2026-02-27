@@ -41,7 +41,7 @@ Four enforcement layers, each backed by shell scripts that block tool execution 
 If any check fails, `ExitPlanMode` is blocked and the model gets a specific error message telling it what's missing.
 
 ### Layer 4: Destructive Command Guard
-**Dangerous shell commands are blocked when they'd discard work.** `guard_destructive_bash.sh` intercepts every `Bash` tool call and blocks `git checkout --`, `git reset --hard`, `git clean -f`, and `rm -rf` when they target uncommitted or git-tracked files. The model must ask the user for confirmation before proceeding.
+**Dangerous shell commands are blocked when they'd discard work.** `settings.json` grants `Bash(*)` — all Bash commands are allowed at the permission layer. `guard_destructive_bash.sh` is the **sole enforcement point**: it intercepts every `Bash` tool call and blocks commands like `git checkout --`, `git reset --hard`, `git clean -f`, `rm -rf`, and `--no-verify` when they would discard work or skip hooks. No per-command allowlist is maintained; the denylist in the guard script is the only gate.
 
 ## Claude with this system vs Codex SDLC (as of Feb 24, 2026)
 
@@ -127,7 +127,7 @@ Commit message hygiene and safety checks. Set globally via `git config --global 
 | File | Purpose |
 |------|---------|
 | `CLAUDE.md` | Instructions loaded into every session — rules, plan requirements, state machine docs |
-| `settings.json` | Hook wiring — maps tool events to enforcement scripts |
+| `settings.json` | Hook wiring and permissions — maps tool events to enforcement scripts; grants `Bash(*)` with the guard script as sole denylist enforcer |
 
 ## Prerequisites
 
