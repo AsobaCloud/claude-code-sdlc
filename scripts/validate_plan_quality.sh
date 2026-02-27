@@ -302,7 +302,16 @@ SCOPE=$(echo "$PLAN_CONTENT" \
     | sed 's/[[:space:]]*$//' \
     | sed 's/`//g' \
     | sed 's/ — .*//' \
-    | sed 's/ - [A-Z].*//')
+    | sed 's/ - [A-Z].*//' \
+    | while IFS= read -r p; do
+        if [[ "$p" == ./* ]]; then
+            echo "$(pwd)/${p#./}"
+        elif [[ "$p" != /* && "$p" != '~'* ]]; then
+            echo "$(pwd)/$p"
+        else
+            echo "$p"
+        fi
+      done)
 state_write scope "$SCOPE"
 
 # Extract Success Criteria
