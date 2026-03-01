@@ -54,13 +54,7 @@ Re-run your plan with a valid ## Scope section listing files to modify."
     IN_SCOPE=false
     while IFS= read -r SCOPE_PATH; do
         [[ -z "$SCOPE_PATH" ]] && continue
-        local_expanded="${SCOPE_PATH/#\~/$HOME}"
-        # Exact match
-        [[ "$FILE_PATH" == "$local_expanded" ]] && IN_SCOPE=true && break
-        # File ends with scope path
-        [[ "$FILE_PATH" == *"$SCOPE_PATH" ]] && IN_SCOPE=true && break
-        # Scope is directory prefix
-        [[ "$FILE_PATH" == "${local_expanded}"* ]] && IN_SCOPE=true && break
+        [[ "$FILE_PATH" == "$SCOPE_PATH" ]] && IN_SCOPE=true && break
     done <<< "$SCOPE_CONTENT"
 
     if [[ "$IN_SCOPE" == "false" ]]; then
@@ -95,7 +89,9 @@ $(state_read criteria)
 "
 fi
 CONTEXT+="── CONSTRAINT ──
-Edit #${EDIT_COUNT}. ONLY make changes described in the approved plan. When implementation is complete, run: ~/.claude/scripts/clear_approval.sh — then tell the user to /accept or /reject. Do NOT make additional edits after signaling completion.
+Edit #${EDIT_COUNT}. ONLY make changes described in the approved plan.
+When implementation is complete, you MUST run validation (tests, manual checks) BEFORE calling clear_approval.sh. Unvalidated edits will be blocked.
+Then run: ~/.claude/scripts/clear_approval.sh — then tell the user to /accept or /reject. Do NOT make additional edits after signaling completion.
 "
 
 if [[ -n "$CONTEXT" ]]; then

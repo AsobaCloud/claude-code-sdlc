@@ -24,20 +24,12 @@ if [[ -n "$PLAN_FILE" && -f "$PLAN_FILE" ]]; then
     SCOPE=$(echo "$PLAN_CONTENT" \
         | sed -n '/^##[[:space:]]*[Ss]cope/,/^##/p' \
         | tail -n +2 | grep -v '^## ' \
-        | grep -E '^\s*-\s+' \
-        | grep '/' \
+        | grep -E '^\s*-\s+/' \
         | sed 's/^[[:space:]]*-[[:space:]]*//' \
         | sed 's/[[:space:]]*$//' \
         | sed 's/`//g' \
-        | while IFS= read -r p; do
-            if [[ "$p" == ./* ]]; then
-                echo "$(pwd)/${p#./}"
-            elif [[ "$p" != /* && "$p" != '~'* ]]; then
-                echo "$(pwd)/$p"
-            else
-                echo "$p"
-            fi
-          done)
+        | sed 's/ — .*//' \
+        | sed 's/ - [A-Z].*//')
     state_write scope "$SCOPE"
 
     CRIT=$(echo "$PLAN_CONTENT" \

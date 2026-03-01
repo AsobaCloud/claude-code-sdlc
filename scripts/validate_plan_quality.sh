@@ -183,9 +183,9 @@ else
 "
     else
         SCOPE_CONTENT=$(echo "$PLAN_CONTENT" | sed -n '/^##[[:space:]]*[Ss]cope/,/^##/p' | tail -n +2 | grep -v '^## ')
-        SCOPE_LINES=$(echo "$SCOPE_CONTENT" | grep -E '^\s*-\s+.*/' | grep -E '\.[a-zA-Z]{1,10}(\s|$|`|\))')
+        SCOPE_LINES=$(echo "$SCOPE_CONTENT" | grep -E '^\s*-\s+/')
         if [[ -z "$SCOPE_LINES" ]]; then
-            ERRORS+="## Scope has no file paths (need '- path/to/file.ext' lines).
+            ERRORS+="## Scope entries must be full absolute paths (e.g., - /Users/shingi/project/file.ext).
 
 "
         fi
@@ -292,26 +292,16 @@ OBJ=$(echo "$PLAN_CONTENT" \
     | head -3)
 state_write objective "$OBJ"
 
-# Extract Scope — strip description suffixes after ' — ' or ' - ' that follow file paths
+# Extract Scope — absolute paths only, stored verbatim
 SCOPE=$(echo "$PLAN_CONTENT" \
     | sed -n '/^##[[:space:]]*[Ss]cope/,/^##/p' \
     | tail -n +2 | grep -v '^## ' \
-    | grep -E '^\s*-\s+' \
-    | grep '/' \
+    | grep -E '^\s*-\s+/' \
     | sed 's/^[[:space:]]*-[[:space:]]*//' \
     | sed 's/[[:space:]]*$//' \
     | sed 's/`//g' \
     | sed 's/ — .*//' \
-    | sed 's/ - [A-Z].*//' \
-    | while IFS= read -r p; do
-        if [[ "$p" == ./* ]]; then
-            echo "$(pwd)/${p#./}"
-        elif [[ "$p" != /* && "$p" != '~'* ]]; then
-            echo "$(pwd)/$p"
-        else
-            echo "$p"
-        fi
-      done)
+    | sed 's/ - [A-Z].*//')
 state_write scope "$SCOPE"
 
 # Extract Success Criteria
