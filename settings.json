@@ -9,7 +9,6 @@
       "Bash(*)"
     ]
   },
-  "model": "sonnet",
   "hooks": {
     "UserPromptSubmit": [
       {
@@ -80,6 +79,24 @@
           {
             "type": "command",
             "command": "~/.claude/scripts/clear_plan_on_new_task.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/scripts/track_dirty.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/scripts/track_validation.sh"
           }
         ]
       }

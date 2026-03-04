@@ -4,7 +4,7 @@
 PROJECT_HASH=$(pwd | shasum | cut -c1-12)
 PERSIST_DIR="${CLAUDE_TEST_PERSIST_DIR:-${HOME}/.claude/state/${PROJECT_HASH}}"
 
-# Clear project state (including diagnostic_mode)
-rm -f "${PERSIST_DIR}/approved" "${PERSIST_DIR}/objective" "${PERSIST_DIR}/scope" "${PERSIST_DIR}/criteria" "${PERSIST_DIR}/plan_file" "${PERSIST_DIR}/planning" "${PERSIST_DIR}/diagnostic_mode"
+# Clear project state (including diagnostic_mode and validation state)
+rm -f "${PERSIST_DIR}/approved" "${PERSIST_DIR}/objective" "${PERSIST_DIR}/scope" "${PERSIST_DIR}/criteria" "${PERSIST_DIR}/plan_file" "${PERSIST_DIR}/planning" "${PERSIST_DIR}/diagnostic_mode" "${PERSIST_DIR}/dirty" "${PERSIST_DIR}/validated" "${PERSIST_DIR}/validation_log"
 
 echo "Implementation rejected. Plan approval cleared. Provide feedback for re-planning."

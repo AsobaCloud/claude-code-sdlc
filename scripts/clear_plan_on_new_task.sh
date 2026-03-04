@@ -11,6 +11,11 @@ state_remove scope
 state_remove criteria
 state_remove plan_file
 
+# Clear validation state
+state_remove dirty
+state_remove validated
+state_remove validation_log
+
 # Enter planning mode
 state_write planning "1"
 

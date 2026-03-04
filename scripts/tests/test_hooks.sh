@@ -1017,6 +1017,156 @@ assert_exit_code 0 && assert_output_not_contains '"deny"' && pass
 teardown
 
 # ══════════════════════════════════════════════════════════════════
+# GROUP 11: Two-tier validation (unit + E2E)
+# ══════════════════════════════════════════════════════════════════
+printf "\n${YELLOW}── Group 11: Two-tier validation (unit + E2E) ──${NC}\n"
+
+TRACK_VAL="${SCRIPTS_DIR}/track_validation.sh"
+RECORD_VAL="${SCRIPTS_DIR}/record_validation.sh"
+
+# 11.1 Unit test alone sets validated_unit but does NOT clear dirty
+begin_test "11.1 Unit test alone → validated_unit set, dirty remains"
+setup
+echo "unit test run" > "${CLAUDE_TEST_PERSIST_DIR}/dirty"
+run_hook "$TRACK_VAL" "$(json_bash_pretooluse "npm test")"
+assert_file_exists "${CLAUDE_TEST_PERSIST_DIR}/validated_unit" "validated_unit marker" \
+    && assert_file_exists "${CLAUDE_TEST_PERSIST_DIR}/dirty" "dirty still present" \
+    && pass
+teardown
+
+# 11.2 E2E test alone sets validated_e2e but does NOT clear dirty
+begin_test "11.2 E2E test alone → validated_e2e set, dirty remains"
+setup
+echo "e2e test run" > "${CLAUDE_TEST_PERSIST_DIR}/dirty"
+run_hook "$TRACK_VAL" "$(json_bash_pretooluse "npm run test:e2e")"
+assert_file_exists "${CLAUDE_TEST_PERSIST_DIR}/validated_e2e" "validated_e2e marker" \
+    && assert_file_exists "${CLAUDE_TEST_PERSIST_DIR}/dirty" "dirty still present" \
+    && pass
+teardown
+
+# 11.3 Both unit + E2E tests → dirty cleared
+begin_test "11.3 Unit + E2E together → dirty cleared"
+setup
+echo "both tests" > "${CLAUDE_TEST_PERSIST_DIR}/dirty"
+run_hook "$TRACK_VAL" "$(json_bash_pretooluse "pytest")"
+if assert_file_exists "${CLAUDE_TEST_PERSIST_DIR}/dirty" "dirty after unit only"; then
+    run_hook "$TRACK_VAL" "$(json_bash_pretooluse "pytest --e2e")"
+    assert_file_missing "${CLAUDE_TEST_PERSIST_DIR}/dirty" "dirty cleared after both" \
+        && assert_file_missing "${CLAUDE_TEST_PERSIST_DIR}/validated_unit" "validated_unit cleaned up" \
+        && assert_file_missing "${CLAUDE_TEST_PERSIST_DIR}/validated_e2e" "validated_e2e cleaned up" \
+        && pass
+fi
+teardown
+
+# 11.4 E2E keywords detected: cypress, playwright, selenium, integration, e2e flag
+begin_test "11.4 E2E keyword detection (multiple patterns)"
+setup
+echo "keyword test" > "${CLAUDE_TEST_PERSIST_DIR}/dirty"
+run_hook "$TRACK_VAL" "$(json_bash_pretooluse "npx cypress run")"
+assert_file_exists "${CLAUDE_TEST_PERSIST_DIR}/validated_e2e" "cypress → e2e marker" \
+    && pass
+teardown
+
+begin_test "11.5 E2E keyword: playwright"
+setup
+echo "keyword test" > "${CLAUDE_TEST_PERSIST_DIR}/dirty"
+run_hook "$TRACK_VAL" "$(json_bash_pretooluse "npx playwright test")"
+assert_file_exists "${CLAUDE_TEST_PERSIST_DIR}/validated_e2e" "playwright → e2e marker" \
+    && pass
+teardown
+
+begin_test "11.6 E2E keyword: --integration flag"
+setup
+echo "keyword test" > "${CLAUDE_TEST_PERSIST_DIR}/dirty"
+run_hook "$TRACK_VAL" "$(json_bash_pretooluse "npm test -- --integration")"
+assert_file_exists "${CLAUDE_TEST_PERSIST_DIR}/validated_e2e" "integration flag → e2e marker" \
+    && pass
+teardown
+
+# 11.7 record_validation.sh without --force → rejected
+begin_test "11.7 record_validation.sh without --force → rejected"
+setup
+echo "manual test" > "${CLAUDE_TEST_PERSIST_DIR}/dirty"
+HOOK_OUTPUT=""
+HOOK_EXIT=0
+HOOK_OUTPUT=$(bash "$RECORD_VAL" "manual check" 2>&1) || HOOK_EXIT=$?
+assert_exit_code 1 \
+    && assert_output_contains "force" \
+    && assert_file_exists "${CLAUDE_TEST_PERSIST_DIR}/dirty" "dirty NOT cleared" \
+    && pass
+teardown
+
+# 11.8 record_validation.sh --force → clears dirty (blanket override)
+begin_test "11.8 record_validation.sh --force → clears dirty"
+setup
+echo "force test" > "${CLAUDE_TEST_PERSIST_DIR}/dirty"
+HOOK_OUTPUT=""
+HOOK_EXIT=0
+HOOK_OUTPUT=$(bash "$RECORD_VAL" --force "manual override check" 2>&1) || HOOK_EXIT=$?
+assert_exit_code 0 \
+    && assert_file_missing "${CLAUDE_TEST_PERSIST_DIR}/dirty" "dirty cleared" \
+    && assert_file_exists "${CLAUDE_TEST_PERSIST_DIR}/validated_unit" "validated_unit set" \
+    && assert_file_exists "${CLAUDE_TEST_PERSIST_DIR}/validated_e2e" "validated_e2e set" \
+    && pass
+teardown
+
+# 11.9 record_validation.sh --force logs MANUAL OVERRIDE prefix
+begin_test "11.9 record_validation.sh --force → MANUAL OVERRIDE in log"
+setup
+echo "log test" > "${CLAUDE_TEST_PERSIST_DIR}/dirty"
+HOOK_OUTPUT=""
+HOOK_EXIT=0
+HOOK_OUTPUT=$(bash "$RECORD_VAL" --force "visual inspection" 2>&1) || HOOK_EXIT=$?
+assert_file_contains "${CLAUDE_TEST_PERSIST_DIR}/validation_log" "MANUAL OVERRIDE" \
+    && pass
+teardown
+
+# 11.10 No dirty flag → validation still records markers (no error)
+begin_test "11.10 No dirty → unit test still sets validated_unit"
+setup
+# No dirty flag set — should still record the tier marker without error
+run_hook "$TRACK_VAL" "$(json_bash_pretooluse "npm test")"
+assert_file_exists "${CLAUDE_TEST_PERSIST_DIR}/validated_unit" "validated_unit set even without dirty" \
+    && assert_exit_code 0 \
+    && pass
+teardown
+
+# 11.11 E2E before unit also works (order doesn't matter)
+begin_test "11.11 E2E first, then unit → dirty cleared"
+setup
+echo "order test" > "${CLAUDE_TEST_PERSIST_DIR}/dirty"
+run_hook "$TRACK_VAL" "$(json_bash_pretooluse "npx playwright test")"
+if assert_file_exists "${CLAUDE_TEST_PERSIST_DIR}/dirty" "dirty after e2e only"; then
+    run_hook "$TRACK_VAL" "$(json_bash_pretooluse "cargo test")"
+    assert_file_missing "${CLAUDE_TEST_PERSIST_DIR}/dirty" "dirty cleared after both (reverse order)" \
+        && pass
+fi
+teardown
+
+# 11.12 clear_approval.sh and accept_outcome.sh clean up tier markers
+begin_test "11.12 clear_approval.sh cleans up tier markers"
+setup
+echo "npm test" > "${CLAUDE_TEST_PERSIST_DIR}/validated_unit"
+echo "npx cypress run" > "${CLAUDE_TEST_PERSIST_DIR}/validated_e2e"
+echo "1" > "${CLAUDE_TEST_PERSIST_DIR}/approved"
+run_hook "${SCRIPTS_DIR}/clear_approval.sh" ""
+assert_file_missing "${CLAUDE_TEST_PERSIST_DIR}/validated_unit" "validated_unit cleaned" \
+    && assert_file_missing "${CLAUDE_TEST_PERSIST_DIR}/validated_e2e" "validated_e2e cleaned" \
+    && pass
+teardown
+
+begin_test "11.13 accept_outcome.sh cleans up tier markers"
+setup
+echo "npm test" > "${CLAUDE_TEST_PERSIST_DIR}/validated_unit"
+echo "npx cypress run" > "${CLAUDE_TEST_PERSIST_DIR}/validated_e2e"
+echo "1" > "${CLAUDE_TEST_PERSIST_DIR}/approved"
+run_hook "${SCRIPTS_DIR}/accept_outcome.sh" ""
+assert_file_missing "${CLAUDE_TEST_PERSIST_DIR}/validated_unit" "validated_unit cleaned" \
+    && assert_file_missing "${CLAUDE_TEST_PERSIST_DIR}/validated_e2e" "validated_e2e cleaned" \
+    && pass
+teardown
+
+# ══════════════════════════════════════════════════════════════════
 # Final report
 # ══════════════════════════════════════════════════════════════════
 printf "\n${YELLOW}══════════════════════════════════════════${NC}\n"
