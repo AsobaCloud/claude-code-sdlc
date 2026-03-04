@@ -44,6 +44,7 @@ Every plan MUST include:
 - Existing code/patterns you found that relate to this change
 - Specific files that will be modified
 - The minimal change needed
+- Test-first implementation order when code changes are involved
 
 Every plan MUST include these enforced sections:
 - `## Objective` — What are we doing and why (≥ 10 words)
@@ -62,6 +63,18 @@ The Scope section is enforced: edits to files not listed will be BLOCKED.
 Every plan MUST reference a SEP issue (e.g., "Implements SEP-003") unless the project
 has a `.sep-exempt` marker. If no SEP exists, create one during planning via Bash:
 `~/.claude/scripts/sep_create.sh "title" "summary" "motivation" "change" "criteria"`
+
+## Test-Driven Implementation Order
+
+When a plan involves code changes, implementation MUST follow this order:
+
+- **Phase A — Write failing tests first.** Write tests that cover the planned behavior,
+  then run them to confirm they fail. This validates that the tests actually detect the
+  absence of the new code.
+- **Phase B — Implement until all tests pass.** Write the minimal production code needed
+  to make the failing tests pass. Do not move beyond Phase B until all tests are green.
+- **Exception:** Documentation-only changes (README, comments, CLAUDE.md, plans, SEPs)
+  do not require Phase A/B ordering.
 
 ## UI Changes Require ASCII Mockups
 When a plan involves ANY visual/UI change, the plan MUST include an ASCII mockup
@@ -129,7 +142,30 @@ session changes, context compaction, and new sessions — no session-scoped stat
 3. Write substantive plan to plan file (50+ words, all required sections)
 4. `ExitPlanMode` → validates plan quality → approved → editing unlocked
 5. Implement ONLY the changes described in the plan
-6. Run `~/.claude/scripts/clear_approval.sh` → locked. Tell user to `/accept` or `/reject`.
+6. **Validate** — run tests or verification commands. Edits set a `dirty` flag; validation clears it.
+7. Run `~/.claude/scripts/clear_approval.sh` → blocked if `dirty` exists → locked. Tell user to `/accept` or `/reject`.
+
+### Validation State Markers (Two-Tier — SEP-005)
+
+- `dirty` — set automatically when a non-exempt file is edited; cleared only when BOTH validation tiers pass
+- `validated_unit` — set when a unit test command passes (cleared after both tiers complete)
+- `validated_e2e` — set when an E2E/integration test command passes (cleared after both tiers complete)
+- `validated` — records the last validation command that was run
+- `validation_log` — append-only log of all validation commands with timestamps
+
+**Two-tier requirement:** Both a unit test AND an E2E/integration test must pass before the dirty flag clears. Running only one tier records progress but does NOT unlock completion.
+
+Recognized **unit test** commands (detected automatically via PostToolUse on Bash):
+`npm test`, `pytest`, `go test`, `cargo test`, `make test`, `bun test`, and other standard test runners.
+
+Recognized **E2E/integration test** patterns (commands containing these keywords):
+`e2e`, `end-to-end`, `integration`, `functional`, `cypress`, `playwright`, `selenium`, `puppeteer`, `--e2e`, `--integration`
+
+Examples: `npm run test:e2e`, `npx cypress run`, `npx playwright test`, `pytest --e2e`, `make test-integration`
+
+For non-standard validation (manual testing, curl, visual inspection):
+`~/.claude/scripts/record_validation.sh --force "description of what was validated"`
+Note: `--force` flag is required to confirm manual bypass of the two-tier requirement.
 
 ### Writes Allowed During Planning (no approval needed)
 
@@ -156,3 +192,4 @@ If approval is lost: user types `/approve` or runs `~/.claude/scripts/restore_ap
 - DO NOT create state marker files directly
 - DO NOT make edits after running clear_approval.sh — you are locked out
 - DO NOT make edits beyond what the approved plan describes
+- DO NOT call clear_approval.sh without running validation first — it will be blocked
