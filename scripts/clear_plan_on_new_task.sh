@@ -10,6 +10,8 @@ state_remove objective
 state_remove scope
 state_remove criteria
 state_remove plan_file
+state_remove plan_hash
+state_remove planning_started_at
 
 # Clear validation state
 state_remove dirty
@@ -18,6 +20,7 @@ state_remove validation_log
 
 # Enter planning mode
 state_write planning "1"
+state_write planning_started_at "$(date +%s)"
 
 echo "Previous plan cleared. Read docs and code before writing a plan."
 exit 0

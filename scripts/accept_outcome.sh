@@ -36,6 +36,6 @@ if [[ -f "${PERSIST_DIR}/objective" ]]; then
 fi
 
 # Clear project state (including diagnostic_mode and validation state)
-rm -f "${PERSIST_DIR}/approved" "${PERSIST_DIR}/objective" "${PERSIST_DIR}/scope" "${PERSIST_DIR}/criteria" "${PERSIST_DIR}/plan_file" "${PERSIST_DIR}/planning" "${PERSIST_DIR}/diagnostic_mode" "${PERSIST_DIR}/dirty" "${PERSIST_DIR}/validated" "${PERSIST_DIR}/validation_log" "${PERSIST_DIR}/validated_unit" "${PERSIST_DIR}/validated_e2e"
+rm -f "${PERSIST_DIR}/approved" "${PERSIST_DIR}/objective" "${PERSIST_DIR}/scope" "${PERSIST_DIR}/criteria" "${PERSIST_DIR}/plan_file" "${PERSIST_DIR}/plan_hash" "${PERSIST_DIR}/planning" "${PERSIST_DIR}/planning_started_at" "${PERSIST_DIR}/diagnostic_mode" "${PERSIST_DIR}/dirty" "${PERSIST_DIR}/validated" "${PERSIST_DIR}/validation_log" "${PERSIST_DIR}/validated_unit" "${PERSIST_DIR}/validated_e2e"
 
 echo "Implementation accepted. Plan approval cleared. Ready for next task."

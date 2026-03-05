@@ -41,24 +41,53 @@ If you already had approval, ask the user to type /approve."
     fi
 fi
 
-# ── Scope enforcement (fail-closed) ──
-if state_exists scope; then
-    SCOPE_CONTENT=$(state_read scope)
+# ── Approval metadata integrity checks (fail-closed) ──
+METADATA_ERRORS=""
+PLAN_FILE=$(normalize_plan_path "$(state_read plan_file)")
+SCOPE_CONTENT=$(state_read scope)
+APPROVED_PLAN_HASH=$(state_read plan_hash)
 
-    # Empty scope file = fail closed (block everything)
-    if [[ -z "$SCOPE_CONTENT" ]]; then
-        deny_tool "BLOCKED: Scope file exists but is empty — cannot verify file is in scope.
-Re-run your plan with a valid ## Scope section listing files to modify."
+if [[ -z "$PLAN_FILE" ]]; then
+    METADATA_ERRORS+="  - Missing plan_file marker.
+"
+elif [[ ! -f "$PLAN_FILE" ]]; then
+    METADATA_ERRORS+="  - Plan file not found: $PLAN_FILE
+"
+fi
+
+if [[ -z "$APPROVED_PLAN_HASH" ]]; then
+    METADATA_ERRORS+="  - Missing plan_hash marker.
+"
+elif [[ -n "$PLAN_FILE" && -f "$PLAN_FILE" ]]; then
+    CURRENT_PLAN_HASH=$(plan_file_hash "$PLAN_FILE")
+    if [[ "$CURRENT_PLAN_HASH" != "$APPROVED_PLAN_HASH" ]]; then
+        METADATA_ERRORS+="  - Plan changed since approval (hash mismatch).
+"
     fi
+fi
 
-    IN_SCOPE=false
-    while IFS= read -r SCOPE_PATH; do
-        [[ -z "$SCOPE_PATH" ]] && continue
-        [[ "$FILE_PATH" == "$SCOPE_PATH" ]] && IN_SCOPE=true && break
-    done <<< "$SCOPE_CONTENT"
+if [[ -z "$SCOPE_CONTENT" ]]; then
+    METADATA_ERRORS+="  - Missing or empty scope marker.
+"
+fi
 
-    if [[ "$IN_SCOPE" == "false" ]]; then
-        deny_tool "BLOCKED: File not in approved scope.
+if [[ -n "$METADATA_ERRORS" ]]; then
+    deny_tool "BLOCKED: Approval metadata is stale or incomplete.
+
+Detected issues:
+${METADATA_ERRORS}
+NEXT ACTION: Re-approve the current plan (ExitPlanMode or /approve) before editing."
+fi
+
+# ── Scope enforcement ──
+IN_SCOPE=false
+while IFS= read -r SCOPE_PATH; do
+    [[ -z "$SCOPE_PATH" ]] && continue
+    [[ "$FILE_PATH" == "$SCOPE_PATH" ]] && IN_SCOPE=true && break
+done <<< "$SCOPE_CONTENT"
+
+if [[ "$IN_SCOPE" == "false" ]]; then
+    deny_tool "BLOCKED: File not in approved scope.
 
 File: $FILE_PATH
 
@@ -66,7 +95,6 @@ Approved scope:
 $(echo "$SCOPE_CONTENT" | sed 's/^/  - /')
 
 To modify this file, update your plan's ## Scope section and get re-approval."
-    fi
 fi
 
 # ── Context injection (every edit) ──

@@ -6,26 +6,16 @@ init_hook
 
 ERRORS=""
 
-# ── Check 1: Find plan file ──
-PLAN_FILE=""
-NEWEST_TIME=0
-
-for DIR in ~/.claude/plans .claude/plans; do
-    [[ ! -d "$DIR" ]] && continue
-    while IFS= read -r -d '' F; do
-        FTIME=$(file_mtime "$F")
-        if [[ "$FTIME" -gt "$NEWEST_TIME" ]]; then
-            NEWEST_TIME=$FTIME
-            PLAN_FILE=$F
-        fi
-    done < <(find "$DIR" -maxdepth 1 -name '*.md' -print0 2>/dev/null)
-done
+# ── Check 1: Resolve plan file ──
+PLAN_FILE=$(resolve_plan_file_for_exit_plan)
 
 if [[ -z "$PLAN_FILE" ]]; then
     deny_tool "BLOCKED: No plan file found in ~/.claude/plans/ or .claude/plans/
 
 NEXT ACTION: Write your plan to a .md file in the plans directory, then call ExitPlanMode."
 fi
+
+NEWEST_TIME=$(file_mtime "$PLAN_FILE")
 
 # Check staleness (4 hours)
 AGE=$(( $(date +%s) - NEWEST_TIME ))
@@ -280,40 +270,16 @@ if [[ -n "$ERRORS" ]]; then
 ${ERRORS}NEXT ACTION: Fix all issues above in your plan file, then call ExitPlanMode again."
 fi
 
-# ── All checks passed — create approval and extract plan sections ──
-state_write plan_file "$PLAN_FILE"
-state_write approved "1"
+# ── All checks passed — create coherent approval bundle ──
+if ! write_approval_bundle "$PLAN_FILE"; then
+    deny_tool "BLOCKED: Failed to persist approval metadata from plan.
 
-# Extract Objective
-OBJ=$(echo "$PLAN_CONTENT" \
-    | sed -n '/^##[[:space:]]*[Oo]bjective/,/^##/p' \
-    | tail -n +2 | grep -v '^## ' \
-    | sed '/^[[:space:]]*$/d' \
-    | head -3)
-state_write objective "$OBJ"
-
-# Extract Scope — absolute paths only, stored verbatim
-SCOPE=$(echo "$PLAN_CONTENT" \
-    | sed -n '/^##[[:space:]]*[Ss]cope/,/^##/p' \
-    | tail -n +2 | grep -v '^## ' \
-    | grep -E '^\s*-\s+/' \
-    | sed 's/^[[:space:]]*-[[:space:]]*//' \
-    | sed 's/[[:space:]]*$//' \
-    | sed 's/`//g' \
-    | sed 's/ — .*//' \
-    | sed 's/ - [A-Z].*//')
-state_write scope "$SCOPE"
-
-# Extract Success Criteria
-CRIT=$(echo "$PLAN_CONTENT" \
-    | sed -n '/^##[[:space:]]*[Ss]uccess[[:space:]]*[Cc]riteria/,/^##/p' \
-    | tail -n +2 | grep -v '^## ' \
-    | sed '/^[[:space:]]*$/d' \
-    | head -3)
-state_write criteria "$CRIT"
+NEXT ACTION: Verify the plan file is readable, then call ExitPlanMode again."
+fi
 
 # Clean up planning state
 state_remove planning
+state_remove planning_started_at
 
 if [[ "$IS_INVESTIGATION" == "true" ]]; then
     allow_with_context "Investigation plan approved. Tools unlocked. Execute your investigation systematically, citing evidence for every finding. When done, run ~/.claude/scripts/clear_approval.sh then tell the user to /accept or /reject."

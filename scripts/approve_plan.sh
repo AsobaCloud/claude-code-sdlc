@@ -5,42 +5,21 @@
 source "$(dirname "$0")/common.sh"
 init_hook
 
-# Ensure approval is set (idempotent — validate_plan_quality.sh already did this)
-state_write approved "1"
-
-# Re-extract plan sections if plan_file is known
-PLAN_FILE=$(state_read plan_file)
-
-if [[ -n "$PLAN_FILE" && -f "$PLAN_FILE" ]]; then
-    PLAN_CONTENT=$(cat "$PLAN_FILE" 2>/dev/null)
-
-    OBJ=$(echo "$PLAN_CONTENT" \
-        | sed -n '/^##[[:space:]]*[Oo]bjective/,/^##/p' \
-        | tail -n +2 | grep -v '^## ' \
-        | sed '/^[[:space:]]*$/d' \
-        | head -3)
-    state_write objective "$OBJ"
-
-    SCOPE=$(echo "$PLAN_CONTENT" \
-        | sed -n '/^##[[:space:]]*[Ss]cope/,/^##/p' \
-        | tail -n +2 | grep -v '^## ' \
-        | grep -E '^\s*-\s+/' \
-        | sed 's/^[[:space:]]*-[[:space:]]*//' \
-        | sed 's/[[:space:]]*$//' \
-        | sed 's/`//g' \
-        | sed 's/ — .*//' \
-        | sed 's/ - [A-Z].*//')
-    state_write scope "$SCOPE"
-
-    CRIT=$(echo "$PLAN_CONTENT" \
-        | sed -n '/^##[[:space:]]*[Ss]uccess[[:space:]]*[Cc]riteria/,/^##/p' \
-        | tail -n +2 | grep -v '^## ' \
-        | sed '/^[[:space:]]*$/d' \
-        | head -3)
-    state_write criteria "$CRIT"
+# Ensure approval bundle is coherent (idempotent fallback for ExitPlanMode).
+if ! approval_bundle_is_complete; then
+    PLAN_FILE=$(resolve_plan_file)
+    if [[ -n "$PLAN_FILE" && -f "$PLAN_FILE" ]]; then
+        write_approval_bundle "$PLAN_FILE" || true
+    fi
 fi
 
 # Clean up planning state
 state_remove planning
+state_remove planning_started_at
 
-allow_with_context "Plan approved. Editing unlocked. Implement ONLY the approved changes. When done, run ~/.claude/scripts/clear_approval.sh then tell the user to /accept or /reject." "PostToolUse"
+if approval_bundle_is_complete; then
+    allow_with_context "Plan approved. Editing unlocked. Implement ONLY the approved changes. When done, run ~/.claude/scripts/clear_approval.sh then tell the user to /accept or /reject." "PostToolUse"
+fi
+
+state_remove approved
+allow_with_context "Plan approval metadata is incomplete. Re-run ExitPlanMode to rebuild scope/objective/criteria before editing." "PostToolUse"

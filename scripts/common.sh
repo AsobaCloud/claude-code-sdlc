@@ -34,6 +34,17 @@ state_exists() { [[ -f "${PERSIST_DIR}/$1" ]]; }
 state_write() { echo "$2" > "${PERSIST_DIR}/$1"; }
 state_read() { cat "${PERSIST_DIR}/$1" 2>/dev/null; }
 state_remove() { rm -f "${PERSIST_DIR}/$1"; }
+counter_increment() {
+    local key="$1"
+    local value=0
+    if state_exists "$key"; then
+        value=$(state_read "$key")
+    fi
+    [[ "$value" =~ ^[0-9]+$ ]] || value=0
+    value=$(( value + 1 ))
+    state_write "$key" "$value"
+    echo "$value"
+}
 
 # Legacy aliases — scripts that call persist_* still work
 persist_file() { echo "${PERSIST_DIR}/$1"; }
@@ -54,6 +65,236 @@ file_mtime() {
     else
         stat -c %Y "$path" 2>/dev/null || echo 0
     fi
+}
+
+# ── Plan helpers ──
+normalize_plan_path() {
+    local raw="$1"
+    raw=$(echo "$raw" | tr -d '\r')
+    raw="${raw%\"}"
+    raw="${raw#\"}"
+    raw="${raw%\'}"
+    raw="${raw#\'}"
+    echo "$raw"
+}
+
+newest_plan_file() {
+    local min_time="${1:-0}"
+    local newest_time=0
+    local plan_file=""
+    local dir f ftime
+
+    [[ "$min_time" =~ ^[0-9]+$ ]] || min_time=0
+
+    for dir in "${HOME}/.claude/plans" ".claude/plans"; do
+        [[ ! -d "$dir" ]] && continue
+        while IFS= read -r -d '' f; do
+            ftime=$(file_mtime "$f")
+            [[ "$ftime" -lt "$min_time" ]] && continue
+            if [[ "$ftime" -gt "$newest_time" ]]; then
+                newest_time="$ftime"
+                plan_file="$f"
+            fi
+        done < <(find "$dir" -maxdepth 1 -name '*.md' -print0 2>/dev/null)
+    done
+
+    [[ -n "$plan_file" ]] && echo "$plan_file"
+}
+
+active_plan_path_from_marker() {
+    local marker plan_file
+
+    for marker in "${HOME}/.claude/.claude_active_plan" "${HOME}/.claude_active_plan"; do
+        [[ ! -f "$marker" ]] && continue
+        plan_file=$(grep -E '^plan_file:' "$marker" | head -1 | sed 's/^plan_file:[[:space:]]*//')
+        plan_file=$(normalize_plan_path "$plan_file")
+        if [[ -n "$plan_file" && -f "$plan_file" ]]; then
+            echo "$plan_file"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+resolve_plan_file() {
+    local plan_file planning_started
+
+    # 1) explicit persisted pointer (strongest)
+    plan_file=$(normalize_plan_path "$(state_read plan_file)")
+    if [[ -n "$plan_file" && -f "$plan_file" ]]; then
+        echo "$plan_file"
+        return 0
+    fi
+
+    # 2) active plan marker
+    plan_file=$(active_plan_path_from_marker)
+    if [[ -n "$plan_file" && -f "$plan_file" ]]; then
+        echo "$plan_file"
+        return 0
+    fi
+
+    # 3) planning window candidate (new plan created since EnterPlanMode)
+    planning_started=$(state_read planning_started_at)
+    if [[ "$planning_started" =~ ^[0-9]+$ && "$planning_started" -gt 0 ]]; then
+        plan_file=$(newest_plan_file "$planning_started")
+        if [[ -n "$plan_file" ]]; then
+            echo "$plan_file"
+            return 0
+        fi
+    fi
+
+    # 4) last-resort newest plan
+    plan_file=$(newest_plan_file 0)
+    if [[ -n "$plan_file" ]]; then
+        echo "$plan_file"
+        return 0
+    fi
+
+    return 1
+}
+
+resolve_plan_file_for_manual_approve() {
+    local plan_file planning_started
+
+    # Prefer a plan created during the current planning window when available.
+    planning_started=$(state_read planning_started_at)
+    if [[ "$planning_started" =~ ^[0-9]+$ && "$planning_started" -gt 0 ]]; then
+        plan_file=$(newest_plan_file "$planning_started")
+        if [[ -n "$plan_file" ]]; then
+            echo "$plan_file"
+            return 0
+        fi
+    fi
+
+    # Then use the newest plan on disk (authoritative for /approve).
+    plan_file=$(newest_plan_file 0)
+    if [[ -n "$plan_file" ]]; then
+        echo "$plan_file"
+        return 0
+    fi
+
+    # Fallback to active marker if no plan files are discoverable.
+    plan_file=$(active_plan_path_from_marker)
+    if [[ -n "$plan_file" && -f "$plan_file" ]]; then
+        echo "$plan_file"
+        return 0
+    fi
+
+    return 1
+}
+
+resolve_plan_file_for_exit_plan() {
+    local plan_file planning_started
+
+    # If planning is active, only trust plans written during this planning window.
+    planning_started=$(state_read planning_started_at)
+    if [[ "$planning_started" =~ ^[0-9]+$ && "$planning_started" -gt 0 ]]; then
+        plan_file=$(newest_plan_file "$planning_started")
+        if [[ -n "$plan_file" ]]; then
+            echo "$plan_file"
+            return 0
+        fi
+        return 1
+    fi
+
+    resolve_plan_file
+}
+
+plan_file_hash() {
+    local plan_file="$1"
+    shasum -a 256 "$plan_file" 2>/dev/null | awk '{print $1}'
+}
+
+extract_plan_objective() {
+    local plan_file="$1"
+    sed -n '/^##[[:space:]]*[Oo]bjective/,/^##/p' "$plan_file" \
+        | tail -n +2 | grep -v '^## ' \
+        | sed '/^[[:space:]]*$/d' \
+        | head -3
+}
+
+extract_plan_scope() {
+    local plan_file="$1"
+    sed -n '/^##[[:space:]]*[Ss]cope/,/^##/p' "$plan_file" \
+        | tail -n +2 | grep -v '^## ' \
+        | grep -E '^\s*-\s+/' \
+        | sed 's/^[[:space:]]*-[[:space:]]*//' \
+        | sed 's/[[:space:]]*$//' \
+        | sed 's/`//g' \
+        | sed 's/ — .*//' \
+        | sed 's/ - [A-Z].*//'
+}
+
+extract_plan_criteria() {
+    local plan_file="$1"
+    sed -n '/^##[[:space:]]*[Ss]uccess[[:space:]]*[Cc]riteria/,/^##/p' "$plan_file" \
+        | tail -n +2 | grep -v '^## ' \
+        | sed '/^[[:space:]]*$/d' \
+        | head -3
+}
+
+write_active_plan_marker() {
+    local plan_file="$1"
+    local plan_hash="$2"
+    local marker="${HOME}/.claude/.claude_active_plan"
+
+    mkdir -p "${HOME}/.claude"
+    cat > "$marker" <<EOF
+plan_file: $plan_file
+plan_hash: $plan_hash
+approved_at: $(date -Iseconds)
+project_hash: ${PROJECT_HASH}
+EOF
+}
+
+write_approval_bundle() {
+    local plan_file="$1"
+    local plan_hash objective scope criteria
+
+    [[ -z "$plan_file" || ! -f "$plan_file" ]] && return 1
+
+    plan_hash=$(plan_file_hash "$plan_file")
+    [[ -z "$plan_hash" ]] && return 1
+
+    objective=$(extract_plan_objective "$plan_file")
+    scope=$(extract_plan_scope "$plan_file")
+    criteria=$(extract_plan_criteria "$plan_file")
+
+    # Write metadata first; set approved marker last to avoid partial state.
+    state_remove approved
+    state_write plan_file "$plan_file"
+    state_write plan_hash "$plan_hash"
+    state_write objective "$objective"
+    state_write scope "$scope"
+    state_write criteria "$criteria"
+    state_write approved "1"
+    write_active_plan_marker "$plan_file" "$plan_hash" || true
+
+    return 0
+}
+
+approval_bundle_is_complete() {
+    local plan_file expected_hash current_hash scope_content
+
+    state_exists approved || return 1
+    state_exists plan_file || return 1
+    state_exists plan_hash || return 1
+    state_exists scope || return 1
+
+    plan_file=$(normalize_plan_path "$(state_read plan_file)")
+    [[ -n "$plan_file" && -f "$plan_file" ]] || return 1
+
+    expected_hash=$(state_read plan_hash)
+    [[ -n "$expected_hash" ]] || return 1
+
+    current_hash=$(plan_file_hash "$plan_file")
+    [[ "$current_hash" == "$expected_hash" ]] || return 1
+
+    scope_content=$(state_read scope)
+    [[ -n "$scope_content" ]] || return 1
+
+    return 0
 }
 
 # ── Hook output: deny tool ──
