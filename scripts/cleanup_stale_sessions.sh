@@ -9,4 +9,22 @@ fi
 # Clean legacy flat files from old hook system
 find /tmp -maxdepth 1 -name '.claude_*' -mmin +360 -delete 2>/dev/null
 
+# Sync global memory into project memory dir via symlinks
+SHARED_MEM="$HOME/.claude/shared-memory"
+if [[ -d "$SHARED_MEM" ]]; then
+    PROJECT_HASH="$(pwd | tr '/' '-' | sed 's/^-//')"
+    PROJECT_MEM="$HOME/.claude/projects/-${PROJECT_HASH}/memory"
+    mkdir -p "$PROJECT_MEM"
+    for f in "$SHARED_MEM"/*.md; do
+        [ -f "$f" ] || continue
+        base="$(basename "$f")"
+        target="$PROJECT_MEM/$base"
+        # Only create symlink if nothing exists at target
+        # (preserves project-specific files with same name)
+        if [ ! -e "$target" ]; then
+            ln -s "$f" "$target"
+        fi
+    done
+fi
+
 exit 0
