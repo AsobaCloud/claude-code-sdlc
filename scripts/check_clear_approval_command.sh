@@ -38,6 +38,11 @@ Your training knowledge is an unreliable prior. Before making ANY factual claim:
 • When evidence contradicts your assumption: STOP, discard the assumption, rebuild from evidence."
 
 # ── Two-phase diagnostic blocking ──
+# Don't trigger diagnostic mode during active implementation
+if [[ "$IS_DIAGNOSTIC" == "true" ]] && state_exists approved; then
+    IS_DIAGNOSTIC=false
+fi
+
 if [[ "$IS_DIAGNOSTIC" == "true" ]]; then
     if ! state_exists diagnostic_mode; then
         # Phase 1: First submission of a diagnostic question

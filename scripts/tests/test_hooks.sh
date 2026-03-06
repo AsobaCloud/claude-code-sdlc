@@ -1167,6 +1167,355 @@ assert_file_missing "${CLAUDE_TEST_PERSIST_DIR}/validated_unit" "validated_unit 
 teardown
 
 # ══════════════════════════════════════════════════════════════════
+# GROUP 12: TDD red-green enforcement
+# ══════════════════════════════════════════════════════════════════
+printf "\n${YELLOW}── Group 12: TDD red-green enforcement ──${NC}\n"
+
+REQUIRE="${SCRIPTS_DIR}/require_plan_approval.sh"
+TRACK_FAIL="${SCRIPTS_DIR}/track_test_failure.sh"
+
+# 12.1 Production file edit blocked when tests_failed absent
+begin_test "12.1 Production edit blocked without tests_failed"
+setup
+echo "1" > "${CLAUDE_TEST_PERSIST_DIR}/approved"
+echo "/src/app.ts" > "${CLAUDE_TEST_PERSIST_DIR}/scope"
+echo "abc123" > "${CLAUDE_TEST_PERSIST_DIR}/plan_hash"
+# Create a minimal plan file for hash validation
+TEMP_PLAN_12="${TEST_TMPDIR}/plan.md"
+cat > "$TEMP_PLAN_12" <<'PLAN'
+## Objective
+Test TDD enforcement for production files
+## Scope
+- /src/app.ts
+## Success Criteria
+Production edits blocked without red tests
+## Justification
+Testing TDD gate
+## Validation
+Testing
+PLAN
+echo "$TEMP_PLAN_12" > "${CLAUDE_TEST_PERSIST_DIR}/plan_file"
+# Compute real hash
+REAL_HASH=$(shasum -a 256 "$TEMP_PLAN_12" | awk '{print $1}')
+echo "$REAL_HASH" > "${CLAUDE_TEST_PERSIST_DIR}/plan_hash"
+# No tests_failed marker
+run_hook "$REQUIRE" "$(json_pretooluse Edit /src/app.ts)"
+assert_json_field '.hookSpecificOutput.permissionDecision' 'deny' \
+    && assert_output_contains "TDD ENFORCEMENT" \
+    && pass
+teardown
+
+# 12.2 Test file edit always allowed (even without tests_failed)
+begin_test "12.2 Test file edit allowed without tests_failed"
+setup
+echo "1" > "${CLAUDE_TEST_PERSIST_DIR}/approved"
+echo "/src/test_app.py" > "${CLAUDE_TEST_PERSIST_DIR}/scope"
+TEMP_PLAN_12="${TEST_TMPDIR}/plan.md"
+cat > "$TEMP_PLAN_12" <<'PLAN'
+## Objective
+Test TDD enforcement allows test files
+## Scope
+- /src/test_app.py
+## Success Criteria
+Test files pass through TDD gate
+## Justification
+Testing TDD gate
+## Validation
+Testing
+PLAN
+echo "$TEMP_PLAN_12" > "${CLAUDE_TEST_PERSIST_DIR}/plan_file"
+REAL_HASH=$(shasum -a 256 "$TEMP_PLAN_12" | awk '{print $1}')
+echo "$REAL_HASH" > "${CLAUDE_TEST_PERSIST_DIR}/plan_hash"
+run_hook "$REQUIRE" "$(json_pretooluse Edit /src/test_app.py)"
+assert_output_not_contains "TDD ENFORCEMENT" && pass
+teardown
+
+# 12.3 track_test_failure.sh sets tests_failed on failing test command
+begin_test "12.3 track_test_failure.sh sets tests_failed on test failure"
+setup
+run_hook "$TRACK_FAIL" "$(json_bash_pretooluse "npm test")"
+assert_file_exists "${CLAUDE_TEST_PERSIST_DIR}/tests_failed" "tests_failed marker" \
+    && pass
+teardown
+
+# 12.4 track_test_failure.sh ignores non-test commands
+begin_test "12.4 track_test_failure.sh ignores non-test commands"
+setup
+run_hook "$TRACK_FAIL" "$(json_bash_pretooluse "ls -la /tmp")"
+assert_file_missing "${CLAUDE_TEST_PERSIST_DIR}/tests_failed" "no tests_failed for ls" \
+    && pass
+teardown
+
+# 12.5 After tests_failed set, production file edit allowed
+begin_test "12.5 Production edit allowed after tests_failed"
+setup
+echo "1" > "${CLAUDE_TEST_PERSIST_DIR}/approved"
+echo "/src/app.ts" > "${CLAUDE_TEST_PERSIST_DIR}/scope"
+TEMP_PLAN_12="${TEST_TMPDIR}/plan.md"
+cat > "$TEMP_PLAN_12" <<'PLAN'
+## Objective
+Test TDD enforcement passes after red phase
+## Scope
+- /src/app.ts
+## Success Criteria
+Production edits allowed after tests fail
+## Justification
+Testing TDD gate
+## Validation
+Testing
+PLAN
+echo "$TEMP_PLAN_12" > "${CLAUDE_TEST_PERSIST_DIR}/plan_file"
+REAL_HASH=$(shasum -a 256 "$TEMP_PLAN_12" | awk '{print $1}')
+echo "$REAL_HASH" > "${CLAUDE_TEST_PERSIST_DIR}/plan_hash"
+echo "2026-01-01T00:00:00Z npm test" > "${CLAUDE_TEST_PERSIST_DIR}/tests_failed"
+run_hook "$REQUIRE" "$(json_pretooluse Edit /src/app.ts)"
+assert_output_not_contains "TDD ENFORCEMENT" && pass
+teardown
+
+# 12.6 Documentation files bypass TDD gate
+begin_test "12.6 Markdown files bypass TDD gate"
+setup
+echo "1" > "${CLAUDE_TEST_PERSIST_DIR}/approved"
+echo "/docs/README.md" > "${CLAUDE_TEST_PERSIST_DIR}/scope"
+TEMP_PLAN_12="${TEST_TMPDIR}/plan.md"
+cat > "$TEMP_PLAN_12" <<'PLAN'
+## Objective
+Test TDD enforcement exempts docs
+## Scope
+- /docs/README.md
+## Success Criteria
+Doc edits bypass TDD gate
+## Justification
+Testing TDD gate
+## Validation
+Testing
+PLAN
+echo "$TEMP_PLAN_12" > "${CLAUDE_TEST_PERSIST_DIR}/plan_file"
+REAL_HASH=$(shasum -a 256 "$TEMP_PLAN_12" | awk '{print $1}')
+echo "$REAL_HASH" > "${CLAUDE_TEST_PERSIST_DIR}/plan_hash"
+# No tests_failed marker
+run_hook "$REQUIRE" "$(json_pretooluse Edit /docs/README.md)"
+assert_output_not_contains "TDD ENFORCEMENT" && pass
+teardown
+
+# 12.7 Full red-green sequence: write test → run (fail) → edit prod → run (pass) → validated
+begin_test "12.7 Full red-green-validate sequence"
+setup
+echo "1" > "${CLAUDE_TEST_PERSIST_DIR}/approved"
+echo -e "/src/test_app.py\n/src/app.py" > "${CLAUDE_TEST_PERSIST_DIR}/scope"
+TEMP_PLAN_12="${TEST_TMPDIR}/plan.md"
+cat > "$TEMP_PLAN_12" <<'PLAN'
+## Objective
+Test full TDD red-green cycle end to end
+## Scope
+- /src/test_app.py
+- /src/app.py
+## Success Criteria
+Full cycle works correctly
+## Justification
+Testing TDD gate
+## Validation
+Testing
+PLAN
+echo "$TEMP_PLAN_12" > "${CLAUDE_TEST_PERSIST_DIR}/plan_file"
+REAL_HASH=$(shasum -a 256 "$TEMP_PLAN_12" | awk '{print $1}')
+echo "$REAL_HASH" > "${CLAUDE_TEST_PERSIST_DIR}/plan_hash"
+# Step 1: Test file edit allowed (no tests_failed needed)
+run_hook "$REQUIRE" "$(json_pretooluse Edit /src/test_app.py)"
+STEP1_OK=false
+echo "$HOOK_OUTPUT" | grep -q "TDD ENFORCEMENT" || STEP1_OK=true
+# Step 2: Production file blocked (no tests_failed yet)
+run_hook "$REQUIRE" "$(json_pretooluse Edit /src/app.py)"
+STEP2_OK=false
+echo "$HOOK_OUTPUT" | grep -q "TDD ENFORCEMENT" && STEP2_OK=true
+# Step 3: Test fails (red) → sets tests_failed
+run_hook "$TRACK_FAIL" "$(json_bash_pretooluse "pytest")"
+STEP3_OK=false
+[[ -f "${CLAUDE_TEST_PERSIST_DIR}/tests_failed" ]] && STEP3_OK=true
+# Step 4: Production file now allowed
+run_hook "$REQUIRE" "$(json_pretooluse Edit /src/app.py)"
+STEP4_OK=false
+echo "$HOOK_OUTPUT" | grep -q "TDD ENFORCEMENT" || STEP4_OK=true
+if $STEP1_OK && $STEP2_OK && $STEP3_OK && $STEP4_OK; then
+    pass
+else
+    fail "Steps: 1=$STEP1_OK 2=$STEP2_OK 3=$STEP3_OK 4=$STEP4_OK"
+fi
+teardown
+
+# 12.8 Fake test sequence blocked: write test → run (pass immediately) → prod edit blocked
+begin_test "12.8 Fake test (passes immediately) does NOT unlock prod edit"
+setup
+echo "1" > "${CLAUDE_TEST_PERSIST_DIR}/approved"
+echo -e "/src/test_app.py\n/src/app.py" > "${CLAUDE_TEST_PERSIST_DIR}/scope"
+TEMP_PLAN_12="${TEST_TMPDIR}/plan.md"
+cat > "$TEMP_PLAN_12" <<'PLAN'
+## Objective
+Test that fake tests do not unlock production
+## Scope
+- /src/test_app.py
+- /src/app.py
+## Success Criteria
+Fake tests blocked
+## Justification
+Testing TDD gate
+## Validation
+Testing
+PLAN
+echo "$TEMP_PLAN_12" > "${CLAUDE_TEST_PERSIST_DIR}/plan_file"
+REAL_HASH=$(shasum -a 256 "$TEMP_PLAN_12" | awk '{print $1}')
+echo "$REAL_HASH" > "${CLAUDE_TEST_PERSIST_DIR}/plan_hash"
+# Test passes (PostToolUse, not PostToolUseFailure) — track_validation runs, NOT track_test_failure
+TRACK_VAL_12="${SCRIPTS_DIR}/track_validation.sh"
+run_hook "$TRACK_VAL_12" "$(json_bash_pretooluse "pytest")"
+# tests_failed should NOT be set (only PostToolUseFailure sets it)
+assert_file_missing "${CLAUDE_TEST_PERSIST_DIR}/tests_failed" "no tests_failed from passing test"
+# Production edit should be blocked
+run_hook "$REQUIRE" "$(json_pretooluse Edit /src/app.py)"
+assert_json_field '.hookSpecificOutput.permissionDecision' 'deny' \
+    && assert_output_contains "TDD ENFORCEMENT" \
+    && pass
+teardown
+
+# 12.9 Diagnostic mode NOT triggered when approved plan exists
+begin_test "12.9 Diagnostic mode skipped during active implementation"
+setup
+CHECK_CMD="${SCRIPTS_DIR}/check_clear_approval_command.sh"
+echo "1" > "${CLAUDE_TEST_PERSIST_DIR}/approved"
+# Simulate a diagnostic-sounding prompt during implementation
+DIAG_JSON=$(jq -n '{"session_id":"test-session-001","prompt":"why are my tests failing?"}')
+run_hook "$CHECK_CMD" "$DIAG_JSON"
+assert_file_missing "${CLAUDE_TEST_PERSIST_DIR}/diagnostic_mode" "no diagnostic_mode during implementation" \
+    && pass
+teardown
+
+# 12.10 Diagnostic mode still triggers when no approved plan exists
+begin_test "12.10 Diagnostic mode triggers without approved plan"
+setup
+CHECK_CMD="${SCRIPTS_DIR}/check_clear_approval_command.sh"
+# No approved marker — diagnostic should trigger
+DIAG_JSON=$(jq -n '{"session_id":"test-session-001","prompt":"why are my tests failing?"}')
+run_hook "$CHECK_CMD" "$DIAG_JSON"
+assert_file_exists "${CLAUDE_TEST_PERSIST_DIR}/diagnostic_mode" "diagnostic_mode set" \
+    && pass
+teardown
+
+# 12.11 Test file patterns: _test.go, .spec.ts, __tests__/ dir
+begin_test "12.11 Various test file patterns bypass TDD gate"
+setup
+echo "1" > "${CLAUDE_TEST_PERSIST_DIR}/approved"
+echo -e "/src/app_test.go\n/src/app.spec.ts\n/src/__tests__/app.js" > "${CLAUDE_TEST_PERSIST_DIR}/scope"
+TEMP_PLAN_12="${TEST_TMPDIR}/plan.md"
+cat > "$TEMP_PLAN_12" <<'PLAN'
+## Objective
+Test various test file pattern recognition
+## Scope
+- /src/app_test.go
+- /src/app.spec.ts
+- /src/__tests__/app.js
+## Success Criteria
+All test patterns recognized
+## Justification
+Testing TDD gate
+## Validation
+Testing
+PLAN
+echo "$TEMP_PLAN_12" > "${CLAUDE_TEST_PERSIST_DIR}/plan_file"
+REAL_HASH=$(shasum -a 256 "$TEMP_PLAN_12" | awk '{print $1}')
+echo "$REAL_HASH" > "${CLAUDE_TEST_PERSIST_DIR}/plan_hash"
+ALL_PASS=true
+for TEST_PATH in "/src/app_test.go" "/src/app.spec.ts" "/src/__tests__/app.js"; do
+    run_hook "$REQUIRE" "$(json_pretooluse Edit "$TEST_PATH")"
+    if echo "$HOOK_OUTPUT" | grep -q "TDD ENFORCEMENT"; then
+        ALL_PASS=false
+        fail "TDD gate blocked test file: $TEST_PATH"
+        break
+    fi
+done
+$ALL_PASS && pass
+teardown
+
+# 12.12 track_test_failure.sh logs failure to validation_log
+begin_test "12.12 track_test_failure.sh appends FAILED to validation_log"
+setup
+run_hook "$TRACK_FAIL" "$(json_bash_pretooluse "pytest")"
+assert_file_contains "${CLAUDE_TEST_PERSIST_DIR}/validation_log" "FAILED: pytest" \
+    && pass
+teardown
+
+# 12.13 tests_failed cleared when two-tier validation completes
+begin_test "12.13 tests_failed cleared on two-tier validation completion"
+setup
+echo "red phase" > "${CLAUDE_TEST_PERSIST_DIR}/tests_failed"
+echo "dirty" > "${CLAUDE_TEST_PERSIST_DIR}/dirty"
+TRACK_VAL_12="${SCRIPTS_DIR}/track_validation.sh"
+# Unit pass
+run_hook "$TRACK_VAL_12" "$(json_bash_pretooluse "pytest")"
+assert_file_exists "${CLAUDE_TEST_PERSIST_DIR}/tests_failed" "tests_failed still present after unit only"
+# E2E pass — should clear tests_failed along with dirty
+run_hook "$TRACK_VAL_12" "$(json_bash_pretooluse "pytest --e2e")"
+assert_file_missing "${CLAUDE_TEST_PERSIST_DIR}/tests_failed" "tests_failed cleared after both tiers" \
+    && pass
+teardown
+
+# 12.14 record_validation.sh --force also sets tests_failed (refactor escape hatch)
+begin_test "12.14 record_validation.sh --force sets tests_failed"
+setup
+echo "refactor" > "${CLAUDE_TEST_PERSIST_DIR}/dirty"
+HOOK_OUTPUT=""
+HOOK_EXIT=0
+HOOK_OUTPUT=$(bash "${SCRIPTS_DIR}/record_validation.sh" --force "refactor: no new behavior" 2>&1) || HOOK_EXIT=$?
+assert_file_exists "${CLAUDE_TEST_PERSIST_DIR}/tests_failed" "tests_failed set by --force" \
+    && pass
+teardown
+
+# 12.15 clear_plan_on_new_task.sh clears tests_failed
+begin_test "12.15 clear_plan_on_new_task.sh clears tests_failed"
+setup
+echo "old red" > "${CLAUDE_TEST_PERSIST_DIR}/tests_failed"
+run_hook "${SCRIPTS_DIR}/clear_plan_on_new_task.sh" "$(json_posttooluse EnterPlanMode)"
+assert_file_missing "${CLAUDE_TEST_PERSIST_DIR}/tests_failed" "tests_failed cleared on new task" \
+    && pass
+teardown
+
+# 12.16 clear_approval.sh clears tests_failed
+begin_test "12.16 clear_approval.sh clears tests_failed"
+setup
+echo "old red" > "${CLAUDE_TEST_PERSIST_DIR}/tests_failed"
+echo "1" > "${CLAUDE_TEST_PERSIST_DIR}/approved"
+# No dirty flag so clear_approval.sh won't block
+HOOK_OUTPUT=""
+HOOK_EXIT=0
+HOOK_OUTPUT=$(bash "${SCRIPTS_DIR}/clear_approval.sh" 2>&1) || HOOK_EXIT=$?
+assert_file_missing "${CLAUDE_TEST_PERSIST_DIR}/tests_failed" "tests_failed cleared" \
+    && pass
+teardown
+
+# 12.17 accept_outcome.sh clears tests_failed
+begin_test "12.17 accept_outcome.sh clears tests_failed"
+setup
+echo "old red" > "${CLAUDE_TEST_PERSIST_DIR}/tests_failed"
+echo "1" > "${CLAUDE_TEST_PERSIST_DIR}/approved"
+HOOK_OUTPUT=""
+HOOK_EXIT=0
+HOOK_OUTPUT=$(bash "${SCRIPTS_DIR}/accept_outcome.sh" 2>&1) || HOOK_EXIT=$?
+assert_file_missing "${CLAUDE_TEST_PERSIST_DIR}/tests_failed" "tests_failed cleared" \
+    && pass
+teardown
+
+# 12.18 reject_outcome.sh clears tests_failed
+begin_test "12.18 reject_outcome.sh clears tests_failed"
+setup
+echo "old red" > "${CLAUDE_TEST_PERSIST_DIR}/tests_failed"
+echo "1" > "${CLAUDE_TEST_PERSIST_DIR}/approved"
+HOOK_OUTPUT=""
+HOOK_EXIT=0
+HOOK_OUTPUT=$(bash "${SCRIPTS_DIR}/reject_outcome.sh" 2>&1) || HOOK_EXIT=$?
+assert_file_missing "${CLAUDE_TEST_PERSIST_DIR}/tests_failed" "tests_failed cleared" \
+    && pass
+teardown
+
+# ══════════════════════════════════════════════════════════════════
 # Final report
 # ══════════════════════════════════════════════════════════════════
 printf "\n${YELLOW}══════════════════════════════════════════${NC}\n"

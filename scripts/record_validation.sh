@@ -106,6 +106,7 @@ if [[ "$MODE" == "force" ]]; then
     echo "[MANUAL OVERRIDE] $DESCRIPTION" > "${PERSIST_DIR}/validated"
     echo "[MANUAL OVERRIDE] $DESCRIPTION" > "${PERSIST_DIR}/validated_unit"
     echo "[MANUAL OVERRIDE] $DESCRIPTION" > "${PERSIST_DIR}/validated_e2e"
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) [MANUAL OVERRIDE] $DESCRIPTION" > "${PERSIST_DIR}/tests_failed"
     echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) [MANUAL OVERRIDE] $DESCRIPTION" >> "${PERSIST_DIR}/validation_log"
     echo "Validation recorded (MANUAL OVERRIDE): ${DESCRIPTION}. Dirty flag cleared."
     exit 0

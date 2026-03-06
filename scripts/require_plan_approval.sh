@@ -97,6 +97,34 @@ $(echo "$SCOPE_CONTENT" | sed 's/^/  - /')
 To modify this file, update your plan's ## Scope section and get re-approval."
 fi
 
+# ── TDD red-green gate ──
+# Test files are always allowed. Production files require tests_failed marker.
+# Exempt: markdown, plan files, SEP files, memory files (already handled above).
+IS_TEST_FILE=false
+if [[ "$FILE_PATH" =~ (^|/)test_[^/]*\.(py|sh)$ ]] || \
+   [[ "$FILE_PATH" =~ (^|/)[^/]*_test\.(py|go)$ ]] || \
+   [[ "$FILE_PATH" =~ (^|/)[^/]*\.(test|spec)\.(ts|js|tsx|jsx)$ ]] || \
+   [[ "$FILE_PATH" =~ (^|/)(tests|test|__tests__|spec)/ ]]; then
+    IS_TEST_FILE=true
+fi
+
+IS_DOC_FILE=false
+if [[ "$FILE_PATH" =~ \.(md|mdx|txt|rst)$ ]]; then
+    IS_DOC_FILE=true
+fi
+
+if [[ "$IS_TEST_FILE" == "false" && "$IS_DOC_FILE" == "false" ]]; then
+    if ! state_exists tests_failed; then
+        deny_tool "TDD ENFORCEMENT: Tests must fail first.
+
+Write your tests, then run them. They must FAIL against the current code
+(proving they test new behavior). Only then can you edit production code.
+
+If this is a refactor with no new behavior, use:
+~/.claude/scripts/record_validation.sh --force \"refactor: no new behavior\""
+    fi
+fi
+
 # ── Context injection (every edit) ──
 EDIT_COUNT=$(counter_increment edit_count)
 

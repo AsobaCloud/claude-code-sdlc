@@ -64,17 +64,30 @@ Every plan MUST reference a SEP issue (e.g., "Implements SEP-003") unless the pr
 has a `.sep-exempt` marker. If no SEP exists, create one during planning via Bash:
 `~/.claude/scripts/sep_create.sh "title" "summary" "motivation" "change" "criteria"`
 
-## Test-Driven Implementation Order
+## Test-Driven Implementation Order (Mechanically Enforced)
 
 When a plan involves code changes, implementation MUST follow this order:
 
 - **Phase A — Write failing tests first.** Write tests that cover the planned behavior,
   then run them to confirm they fail. This validates that the tests actually detect the
-  absence of the new code.
+  absence of the new code. The hook system enforces this: production code edits are
+  **blocked** until a `tests_failed` marker exists (set automatically when a test runner
+  command exits non-zero via `PostToolUseFailure` hook).
 - **Phase B — Implement until all tests pass.** Write the minimal production code needed
   to make the failing tests pass. Do not move beyond Phase B until all tests are green.
-- **Exception:** Documentation-only changes (README, comments, CLAUDE.md, plans, SEPs)
+- **Exception:** Documentation-only changes (`.md`, `.mdx`, `.txt`, `.rst`, plans, SEPs)
   do not require Phase A/B ordering.
+
+**How it works:**
+- Test files are always editable (recognized patterns: `test_*.py`, `*_test.py`,
+  `*_test.go`, `*.test.ts`, `*.spec.ts`, files under `tests/`, `test/`, `__tests__/`, `spec/`).
+- Production file edits require the `tests_failed` marker (proves tests were written and failed).
+- The marker is set by `PostToolUseFailure` on Bash when a test runner command fails.
+- Tests that pass immediately (fake tests) do NOT unlock production code editing.
+- The marker is cleared when two-tier validation completes or a new plan cycle starts.
+
+**Escape hatch for refactors (no new behavior):**
+`~/.claude/scripts/record_validation.sh --force "refactor: no new behavior"`
 
 ## UI Changes Require ASCII Mockups
 When a plan involves ANY visual/UI change, the plan MUST include an ASCII mockup

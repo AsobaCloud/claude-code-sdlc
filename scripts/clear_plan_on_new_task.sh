@@ -17,6 +17,7 @@ state_remove planning_started_at
 state_remove dirty
 state_remove validated
 state_remove validation_log
+state_remove tests_failed
 
 # Enter planning mode
 state_write planning "1"

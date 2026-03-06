@@ -64,6 +64,7 @@ if state_exists validated_unit && state_exists validated_e2e; then
     state_remove dirty
     state_remove validated_unit
     state_remove validated_e2e
+    state_remove tests_failed
     allow_with_context "Two-tier validation complete: both unit and E2E passed. Dirty flag cleared." "PostToolUse"
 else
     # Report which tier was recorded
