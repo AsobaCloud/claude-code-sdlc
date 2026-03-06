@@ -21,3 +21,4 @@
 !plugins/
 !plugins/plan-workflow/
 !plugins/plan-workflow/**
+!SDLC.md

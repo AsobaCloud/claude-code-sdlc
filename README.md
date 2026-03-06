@@ -137,14 +137,19 @@ Commit message hygiene and safety checks. Set globally via `git config --global 
 - **Git** (for hooks and `git rev-parse` in scripts)
 - **Claude Code CLI** installed and working ([install guide](https://docs.anthropic.com/en/docs/claude-code))
 
-**Optional linting tools** (all degrade gracefully if missing):
+**Installed linters** (active in pre-commit hook):
+
+| Tool | Version | Used for | Install |
+|------|---------|----------|---------|
+| `ruff` | 0.14.9 | Python linting | `pip install ruff` |
+| `shellcheck` | 0.11.0 | Shell script analysis | `brew install shellcheck` / `apt install shellcheck` |
+| `eslint` | 10.0.2 | JS/TS linting | `npm install -g eslint` |
+
+**Optional linting tools** (degrade gracefully if missing):
 
 | Tool | Used for | Install |
 |------|----------|---------|
-| `shellcheck` | Shell script analysis | `brew install shellcheck` / `apt install shellcheck` |
-| `ruff` | Python linting | `pip install ruff` |
 | `flake8` | Python linting (ruff fallback) | `pip install flake8` |
-| `eslint` | JS/TS linting | `npm install -g eslint` |
 | `gofmt` | Go formatting | Included with Go |
 | `rustfmt` | Rust formatting | `rustup component add rustfmt` |
 | `git-lfs` | Large file storage | `brew install git-lfs` / `apt install git-lfs` |
@@ -285,5 +290,6 @@ The system is designed so that a competent model doing its job properly never hi
 
 ## Further Reading
 
+- **[SDLC.md](SDLC.md)** — The full enforced lifecycle explained: every phase, every gate, and why each exists
 - **[USER_GUIDE.md](USER_GUIDE.md)** — When to use this, workflow examples, tips for AI/startup engineering
 - **[CLAUDE.md](CLAUDE.md)** — The instruction set loaded into Claude's context
