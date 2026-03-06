@@ -277,6 +277,23 @@ if ! write_approval_bundle "$PLAN_FILE"; then
 NEXT ACTION: Verify the plan file is readable, then call ExitPlanMode again."
 fi
 
+# Append to plan history log (project + global)
+PLAN_DATE=$(date '+%Y-%m-%d %H:%M')
+PLAN_OBJECTIVE=$(extract_plan_objective "$PLAN_FILE" | tr '\n' ' ' | sed 's/  */ /g' | cut -c1-120)
+HISTORY_LINE="- ${PLAN_DATE} | ${PLAN_OBJECTIVE} [${PLAN_FILE##*/}]"
+
+# Project-scoped history
+PROJECT_HASH_DIR=$(pwd | tr '/' '-' | sed 's/^-//')
+PROJECT_MEM="$HOME/.claude/projects/-${PROJECT_HASH_DIR}/memory"
+mkdir -p "$PROJECT_MEM"
+echo "$HISTORY_LINE" >> "$PROJECT_MEM/plan-history.md"
+
+# Global history
+SHARED_MEM="$HOME/.claude/shared-memory"
+if [[ -d "$SHARED_MEM" ]]; then
+    echo "$HISTORY_LINE" >> "$SHARED_MEM/plan-history.md"
+fi
+
 # Clean up planning state
 state_remove planning
 state_remove planning_started_at
