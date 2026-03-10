@@ -14,6 +14,6 @@ if [[ -f "${PERSIST_DIR}/dirty" ]]; then
 fi
 
 # Clear all project state (including diagnostic_mode and validation state)
-rm -f "${PERSIST_DIR}/approved" "${PERSIST_DIR}/objective" "${PERSIST_DIR}/scope" "${PERSIST_DIR}/criteria" "${PERSIST_DIR}/plan_file" "${PERSIST_DIR}/plan_hash" "${PERSIST_DIR}/planning" "${PERSIST_DIR}/planning_started_at" "${PERSIST_DIR}/diagnostic_mode" "${PERSIST_DIR}/dirty" "${PERSIST_DIR}/validated" "${PERSIST_DIR}/validation_log" "${PERSIST_DIR}/validated_unit" "${PERSIST_DIR}/validated_e2e" "${PERSIST_DIR}/tests_failed"
+rm -f "${PERSIST_DIR}/approved" "${PERSIST_DIR}/objective" "${PERSIST_DIR}/scope" "${PERSIST_DIR}/criteria" "${PERSIST_DIR}/plan_file" "${PERSIST_DIR}/plan_hash" "${PERSIST_DIR}/planning" "${PERSIST_DIR}/planning_started_at" "${PERSIST_DIR}/diagnostic_mode" "${PERSIST_DIR}/dirty" "${PERSIST_DIR}/validated" "${PERSIST_DIR}/validation_log" "${PERSIST_DIR}/validated_unit" "${PERSIST_DIR}/validated_e2e" "${PERSIST_DIR}/tests_failed" "${PERSIST_DIR}/approval_token"
 
 echo "Approval cleared for project (hash: ${PROJECT_HASH}). Claude must now plan before editing."

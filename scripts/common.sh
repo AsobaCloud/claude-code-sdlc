@@ -78,6 +78,13 @@ normalize_plan_path() {
     echo "$raw"
 }
 
+# Check if a plan file is marked as completed
+plan_is_done() {
+    local plan_file="$1"
+    [[ -z "$plan_file" || ! -f "$plan_file" ]] && return 1
+    head -3 "$plan_file" | grep -q '^\*\*Status: DONE\*\*'
+}
+
 newest_plan_file() {
     local min_time="${1:-0}"
     local newest_time=0
@@ -91,6 +98,7 @@ newest_plan_file() {
         while IFS= read -r -d '' f; do
             ftime=$(file_mtime "$f")
             [[ "$ftime" -lt "$min_time" ]] && continue
+            plan_is_done "$f" && continue
             if [[ "$ftime" -gt "$newest_time" ]]; then
                 newest_time="$ftime"
                 plan_file="$f"
@@ -122,14 +130,14 @@ resolve_plan_file() {
 
     # 1) explicit persisted pointer (strongest)
     plan_file=$(normalize_plan_path "$(state_read plan_file)")
-    if [[ -n "$plan_file" && -f "$plan_file" ]]; then
+    if [[ -n "$plan_file" && -f "$plan_file" ]] && ! plan_is_done "$plan_file"; then
         echo "$plan_file"
         return 0
     fi
 
     # 2) active plan marker
     plan_file=$(active_plan_path_from_marker)
-    if [[ -n "$plan_file" && -f "$plan_file" ]]; then
+    if [[ -n "$plan_file" && -f "$plan_file" ]] && ! plan_is_done "$plan_file"; then
         echo "$plan_file"
         return 0
     fi
@@ -295,6 +303,53 @@ approval_bundle_is_complete() {
     [[ -n "$scope_content" ]] || return 1
 
     return 0
+}
+
+# ── Conversation token helpers (SEP-005) ──
+resolve_memory_md() {
+    local project_key
+    project_key=$(pwd | tr '/' '-' | sed 's/^-//')
+    echo "$HOME/.claude/projects/-${project_key}/memory/MEMORY.md"
+}
+
+generate_conversation_token() {
+    local token mem_file mem_dir
+    token=$(openssl rand -hex 8)
+
+    # Write to persistent state
+    state_write conversation_token "$token"
+
+    # Write to MEMORY.md so it survives compaction
+    mem_file=$(resolve_memory_md)
+    mem_dir=$(dirname "$mem_file")
+    mkdir -p "$mem_dir"
+
+    if [[ -f "$mem_file" ]]; then
+        # Remove existing Conversation Token section if present
+        local tmp_file="${mem_file}.tmp.$$"
+        awk '
+            /^## Conversation Token/ { skip=1; next }
+            /^## / && skip { skip=0 }
+            !skip { print }
+        ' "$mem_file" > "$tmp_file"
+        mv "$tmp_file" "$mem_file"
+    fi
+
+    # Append token section
+    printf '\n## Conversation Token\n`%s`\n' "$token" >> "$mem_file"
+
+    echo "$token"
+}
+
+read_conversation_token() {
+    local mem_file
+    mem_file=$(resolve_memory_md)
+    [[ -f "$mem_file" ]] || return 1
+    sed -n '/^## Conversation Token/,/^## /{/^`/{s/^`//;s/`$//;p;q;};}' "$mem_file"
+}
+
+read_approval_token() {
+    state_read approval_token
 }
 
 # ── Hook output: deny tool ──

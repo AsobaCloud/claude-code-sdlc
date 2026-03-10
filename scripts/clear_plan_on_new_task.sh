@@ -13,11 +13,15 @@ state_remove plan_file
 state_remove plan_hash
 state_remove planning_started_at
 
+# Clear conversation token association
+state_remove approval_token
+
 # Clear validation state
 state_remove dirty
 state_remove validated
 state_remove validation_log
 state_remove tests_failed
+state_remove tests_reviewed
 
 # Enter planning mode
 state_write planning "1"

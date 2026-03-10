@@ -27,6 +27,12 @@ fi
 state_remove planning
 state_remove planning_started_at
 
+# Associate current conversation token with this approval (SEP-005)
+CONV_TOKEN=$(read_conversation_token)
+if [[ -n "$CONV_TOKEN" ]]; then
+    state_write approval_token "$CONV_TOKEN"
+fi
+
 echo "Approval restored for project (hash: ${PROJECT_HASH})."
 echo "Plan: ${PLAN_FILE}"
 echo "Will persist across sessions until /accept, /reject, or new plan cycle."

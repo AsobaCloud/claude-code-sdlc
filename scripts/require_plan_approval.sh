@@ -79,6 +79,22 @@ ${METADATA_ERRORS}
 NEXT ACTION: Re-approve the current plan (ExitPlanMode or /approve) before editing."
 fi
 
+# ── Conversation token verification (SEP-005) ──
+APPROVAL_TOKEN=$(read_approval_token)
+if [[ -n "$APPROVAL_TOKEN" ]]; then
+    CURRENT_TOKEN=$(read_conversation_token)
+    if [[ -z "$CURRENT_TOKEN" ]]; then
+        deny_tool "BLOCKED: No conversation token found. This session has no token in MEMORY.md.
+
+NEXT ACTION: Run /new-token to initialize a conversation token, then /approve to associate it with the current plan."
+    fi
+    if [[ "$CURRENT_TOKEN" != "$APPROVAL_TOKEN" ]]; then
+        deny_tool "BLOCKED: Approval belongs to a different conversation (token mismatch).
+
+NEXT ACTION: Re-plan with EnterPlanMode, or run /approve to claim the existing plan for this conversation."
+    fi
+fi
+
 # ── Scope enforcement ──
 IN_SCOPE=false
 while IFS= read -r SCOPE_PATH; do
@@ -122,6 +138,20 @@ Write your tests, then run them. They must FAIL against the current code
 
 If this is a refactor with no new behavior, use:
 ~/.claude/scripts/record_validation.sh --force \"refactor: no new behavior\""
+    fi
+    if ! state_exists tests_reviewed; then
+        deny_tool "TEST REVIEW GATE: Present tests to user for review.
+
+Tests have been written and they fail (red phase complete). Before editing
+production code, the user must review the test approach.
+
+WHAT TO DO NOW:
+1. Show the user the test file(s) you wrote and explain what each test verifies
+2. Ask them to review and choose:
+   /approve-tests — tests look good, proceed to implementation
+   /skip-tests — skip testing for this task entirely
+
+Do NOT attempt to edit production code until the user responds."
     fi
 fi
 

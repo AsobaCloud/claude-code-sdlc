@@ -89,6 +89,13 @@ When a plan involves code changes, implementation MUST follow this order:
 **Escape hatch for refactors (no new behavior):**
 `~/.claude/scripts/record_validation.sh --force "refactor: no new behavior"`
 
+### Test Review Gate (human checkpoint)
+
+After tests are written and fail, production code edits remain BLOCKED until the
+user reviews the tests. The model MUST present test files to the user and wait for:
+- `/approve-tests` — user confirms tests are meaningful
+- `/skip-tests` — user bypasses testing entirely (e.g., config changes, CSS tweaks)
+
 ## UI Changes Require ASCII Mockups
 When a plan involves ANY visual/UI change, the plan MUST include an ASCII mockup
 showing the proposed layout BEFORE and AFTER. No UI code without a visual preview.
