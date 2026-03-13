@@ -104,6 +104,72 @@ else
     FULL_CONTEXT="$UNIVERSAL_REMINDER"
 fi
 
+# ── Workflow state injection (SEP-006) ──
+# Build a state summary from persistent markers so the model stays oriented after compaction.
+WORKFLOW_STATE=""
+
+if state_exists approved; then
+    OBJECTIVE=$(state_read objective)
+    SCOPE=$(state_read scope)
+    CRITERIA=$(state_read criteria)
+    PLAN_FILE_PATH=$(state_read plan_file)
+    EDIT_COUNT=$(state_read edit_count)
+    [[ "$EDIT_COUNT" =~ ^[0-9]+$ ]] || EDIT_COUNT=0
+
+    # Determine TDD phase
+    PHASE="APPROVED"
+    PHASE_DETAIL=""
+    if state_exists tests_failed; then
+        if state_exists tests_reviewed; then
+            PHASE="IMPLEMENTING"
+            PHASE_DETAIL="tests written ✓, tests reviewed ✓"
+        else
+            PHASE="TESTS WRITTEN (red phase)"
+            PHASE_DETAIL="tests failed ✓, awaiting /approve-tests"
+        fi
+    fi
+
+    if [[ "$EDIT_COUNT" -gt 0 && -n "$PHASE_DETAIL" ]]; then
+        PHASE_DETAIL="${PHASE_DETAIL}, edits: ${EDIT_COUNT}"
+    elif [[ "$EDIT_COUNT" -gt 0 ]]; then
+        PHASE_DETAIL="edits: ${EDIT_COUNT}"
+    fi
+
+    # Dirty / validation status
+    VALIDATION_STATUS=""
+    if state_exists dirty; then
+        VALIDATION_STATUS="⚠ Validation needed (dirty — edits made but not validated)"
+    fi
+
+    # Build the block
+    WORKFLOW_STATE="── WORKFLOW STATE ──
+Plan: APPROVED | objective: \"${OBJECTIVE}\"
+Phase: ${PHASE}"
+    [[ -n "$PHASE_DETAIL" ]] && WORKFLOW_STATE="${WORKFLOW_STATE} (${PHASE_DETAIL})"
+    [[ -n "$PLAN_FILE_PATH" ]] && WORKFLOW_STATE="${WORKFLOW_STATE}
+Plan file: ${PLAN_FILE_PATH}"
+    [[ -n "$SCOPE" ]] && WORKFLOW_STATE="${WORKFLOW_STATE}
+Scope: ${SCOPE}"
+    [[ -n "$CRITERIA" ]] && WORKFLOW_STATE="${WORKFLOW_STATE}
+Success criteria: ${CRITERIA}"
+    [[ -n "$VALIDATION_STATUS" ]] && WORKFLOW_STATE="${WORKFLOW_STATE}
+${VALIDATION_STATUS}"
+    WORKFLOW_STATE="${WORKFLOW_STATE}
+Next: Continue implementing approved changes."
+
+elif state_exists planning; then
+    WORKFLOW_STATE="── WORKFLOW STATE ──
+Phase: PLANNING (plan mode active)
+Next: Write your plan to a plan file, then call ExitPlanMode to get it approved."
+fi
+
+# Append workflow state to context if present
+if [[ -n "$WORKFLOW_STATE" ]]; then
+    FULL_CONTEXT="${FULL_CONTEXT}
+
+${WORKFLOW_STATE}"
+fi
+
 # ── Output: allow with context injection ──
 jq -n --arg ctx "$FULL_CONTEXT" '{
     "hookSpecificOutput": {

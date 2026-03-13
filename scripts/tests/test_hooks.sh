@@ -10,6 +10,9 @@ PASSED=0
 FAILED=0
 TOTAL=0
 FAILURES=""
+ORIGINAL_HOME="${HOME}"
+
+source "${SCRIPTS_DIR}/common.sh"
 
 # ── Colors ──
 RED='\033[0;31m'
@@ -21,15 +24,17 @@ NC='\033[0m'
 
 setup() {
     TEST_TMPDIR=$(mktemp -d)
-    export CLAUDE_TEST_STATE_DIR="${TEST_TMPDIR}/state"
+    export HOME="${TEST_TMPDIR}/home"
     export CLAUDE_TEST_PERSIST_DIR="${TEST_TMPDIR}/persist"
+    export CLAUDE_TEST_STATE_DIR="${CLAUDE_TEST_PERSIST_DIR}"
     export CLAUDE_TEST_HOOKS_DIR="${TEST_TMPDIR}/hooks"
-    mkdir -p "$CLAUDE_TEST_STATE_DIR" "$CLAUDE_TEST_PERSIST_DIR" "$CLAUDE_TEST_HOOKS_DIR"
+    mkdir -p "$HOME/.claude/plans" "$HOME/.claude/shared-memory" "$CLAUDE_TEST_STATE_DIR" "$CLAUDE_TEST_PERSIST_DIR" "$CLAUDE_TEST_HOOKS_DIR"
 }
 
 teardown() {
     rm -rf "$TEST_TMPDIR"
     unset CLAUDE_TEST_STATE_DIR CLAUDE_TEST_PERSIST_DIR CLAUDE_TEST_HOOKS_DIR
+    export HOME="${ORIGINAL_HOME}"
 }
 
 # Run a hook script, piping JSON on stdin. Sets HOOK_OUTPUT and HOOK_EXIT.
@@ -39,6 +44,12 @@ run_hook() {
     HOOK_OUTPUT=""
     HOOK_EXIT=0
     HOOK_OUTPUT=$(echo "$json" | bash "$script" 2>/dev/null) || HOOK_EXIT=$?
+}
+
+run_script() {
+    HOOK_OUTPUT=""
+    HOOK_EXIT=0
+    HOOK_OUTPUT=$("$@" 2>&1) || HOOK_EXIT=$?
 }
 
 # ── Assertions ──
@@ -164,54 +175,86 @@ json_bash_pretooluse() {
         '{"session_id":"test-session-001","tool_name":"Bash","tool_input":{"command":$cmd}}'
 }
 
+write_plan() {
+    local plan_file="$1"
+    local objective="$2"
+    local scope_block="$3"
+    local criteria="$4"
+    local justification="$5"
+    local validation="$6"
+    local objective_verification="${7:-Review the resulting behavior in the real workspace and confirm the approved objective is met.}"
+
+    mkdir -p "$(dirname "$plan_file")"
+    cat > "$plan_file" <<EOF
+## Objective
+$objective
+
+## Scope
+$scope_block
+
+## Success Criteria
+$criteria
+
+## Justification
+$justification
+
+## Validation
+$validation
+EOF
+
+    cat >> "$plan_file" <<EOF
+
+## Objective Verification
+$objective_verification
+EOF
+}
+
+seed_approval_bundle_from_plan() {
+    local plan_file="$1"
+    PERSIST_DIR="${CLAUDE_TEST_PERSIST_DIR}"
+    PROJECT_HASH="test-project"
+    write_approval_bundle "$plan_file" >/dev/null
+}
+
+mark_tdd_ready() {
+    echo "2026-03-10T00:00:00Z pytest" > "${CLAUDE_TEST_PERSIST_DIR}/tests_failed"
+    echo "1" > "${CLAUDE_TEST_PERSIST_DIR}/tests_reviewed"
+}
+
 # ══════════════════════════════════════════════════════════════════
 # GROUP 1: init_hook / env-var overrides
 # ══════════════════════════════════════════════════════════════════
 printf "\n${YELLOW}── Group 1: init_hook / env-var overrides ──${NC}\n"
 
-# 1.1 STATE_DIR uses CLAUDE_TEST_STATE_DIR
-begin_test "1.1 STATE_DIR uses CLAUDE_TEST_STATE_DIR"
+begin_test "1.1 CLAUDE_TEST_PERSIST_DIR is used by EnterPlanMode hook"
 setup
-run_hook "${SCRIPTS_DIR}/track_exploration.sh" "$(json_pretooluse Read /tmp/foo.sh)"
-# track_exploration is a no-op without planning mode, but init_hook still runs.
-# Set planning mode and re-run to prove state dir is used.
-echo "1" > "${CLAUDE_TEST_STATE_DIR}/planning"
-run_hook "${SCRIPTS_DIR}/track_exploration.sh" "$(json_pretooluse Read /tmp/foo.sh)"
-if assert_file_exists "${CLAUDE_TEST_STATE_DIR}/explore_count"; then
-    pass
-fi
+run_hook "${SCRIPTS_DIR}/clear_plan_on_new_task.sh" "$(json_posttooluse EnterPlanMode)"
+assert_file_exists "${CLAUDE_TEST_PERSIST_DIR}/planning" "planning marker" \
+    && assert_file_exists "${CLAUDE_TEST_PERSIST_DIR}/planning_started_at" "planning_started_at marker" \
+    && pass
 teardown
 
-# 1.2 PERSIST_DIR uses CLAUDE_TEST_PERSIST_DIR
-begin_test "1.2 PERSIST_DIR uses CLAUDE_TEST_PERSIST_DIR"
+begin_test "1.2 CLAUDE_TEST_PERSIST_DIR is used by track_dirty.sh"
 setup
-echo "1" > "${CLAUDE_TEST_PERSIST_DIR}/approved"
-run_hook "${SCRIPTS_DIR}/require_plan_approval.sh" "$(json_pretooluse Edit /some/file.sh)"
-# If PERSIST_DIR is used, hydration will copy approved to STATE_DIR,
-# and the script won't deny (it will allow_with_context instead)
-assert_output_not_contains '"deny"' && pass
+run_hook "${SCRIPTS_DIR}/track_dirty.sh" "$(json_pretooluse Edit /tmp/example.txt)"
+assert_file_exists "${CLAUDE_TEST_PERSIST_DIR}/dirty" "dirty marker" && pass
 teardown
 
-# 1.3 Missing session_id with CLAUDE_TEST_STATE_DIR set → script still runs
-begin_test "1.3 Missing session_id + STATE_DIR set → runs"
+begin_test "1.3 Missing session_id + env var still runs"
 setup
-local_json='{"tool_name":"Read","tool_input":{"file_path":"/tmp/x.sh"}}'
-echo "1" > "${CLAUDE_TEST_STATE_DIR}/planning"
-run_hook "${SCRIPTS_DIR}/track_exploration.sh" "$local_json"
-if assert_file_exists "${CLAUDE_TEST_STATE_DIR}/explore_count"; then
-    pass
-fi
+local_json='{"tool_name":"EnterPlanMode","tool_input":{}}'
+run_hook "${SCRIPTS_DIR}/clear_plan_on_new_task.sh" "$local_json"
+assert_file_exists "${CLAUDE_TEST_PERSIST_DIR}/planning" "planning marker without session_id" && pass
 teardown
 
-# 1.4 Missing session_id + no env var → exits silently (exit 0)
 begin_test "1.4 Missing session_id + no env var → exit 0"
 setup
-unset CLAUDE_TEST_STATE_DIR
-local_json='{"tool_name":"Read","tool_input":{"file_path":"/tmp/x.sh"}}'
-run_hook "${SCRIPTS_DIR}/track_exploration.sh" "$local_json"
-if assert_exit_code 0; then
-    pass
-fi
+PERSIST_PATH="${CLAUDE_TEST_PERSIST_DIR}"
+unset CLAUDE_TEST_STATE_DIR CLAUDE_TEST_PERSIST_DIR CLAUDE_TEST_HOOKS_DIR
+run_hook "${SCRIPTS_DIR}/clear_plan_on_new_task.sh" '{"tool_name":"EnterPlanMode","tool_input":{}}'
+assert_exit_code 0 \
+    && assert_file_missing "${PERSIST_PATH}/planning" "planning marker should not be created" \
+    && pass
 teardown
 
 # ══════════════════════════════════════════════════════════════════
@@ -221,24 +264,30 @@ printf "\n${YELLOW}── Group 2: require_plan_approval.sh ──${NC}\n"
 
 REQUIRE="${SCRIPTS_DIR}/require_plan_approval.sh"
 
-# 2.1 No approved file → deny
 begin_test "2.1 No approved file → deny"
 setup
-run_hook "$REQUIRE" "$(json_pretooluse Edit /some/file.sh)"
+run_hook "$REQUIRE" "$(json_pretooluse Edit /some/file.md)"
 if assert_json_field '.hookSpecificOutput.permissionDecision' 'deny'; then
     pass
 fi
 teardown
 
-# 2.2 Approved file present → no deny (exit 0)
-begin_test "2.2 Approved file present → allow"
+begin_test "2.2 Complete approval bundle → allow"
 setup
-echo "1" > "${CLAUDE_TEST_STATE_DIR}/approved"
-run_hook "$REQUIRE" "$(json_pretooluse Edit /some/file.sh)"
-assert_exit_code 0 && assert_output_not_contains '"deny"' && pass
+PLAN_FILE="${HOME}/.claude/plans/approved-doc-plan.md"
+write_plan \
+    "$PLAN_FILE" \
+    "Update the current hook documentation within a single approved markdown file." \
+    "- /some/file.md" \
+    "The scoped documentation edit is allowed once approval metadata exists." \
+    "Per /Users/shingi/.claude/CLAUDE.md, this keeps the change inside the approved file and follows the existing current documentation workflow." \
+    "I read the current scripts and documentation and verified this is a documentation-only scoped edit for the current codebase."
+seed_approval_bundle_from_plan "$PLAN_FILE"
+run_hook "$REQUIRE" "$(json_pretooluse Edit /some/file.md)"
+assert_json_field '.hookSpecificOutput.permissionDecision' 'allow' \
+    && pass
 teardown
 
-# 2.3 Plan file paths always allowed (no approval needed)
 begin_test "2.3 Plan file paths always allowed"
 setup
 run_hook "$REQUIRE" "$(json_pretooluse Write /home/user/.claude/plans/plan.md)"
@@ -247,36 +296,55 @@ if assert_exit_code 0; then
 fi
 teardown
 
-# 2.4 Scope enforcement: in-scope file allowed, out-of-scope blocked
 begin_test "2.4 Scope enforcement: in-scope → allow"
 setup
-echo "1" > "${CLAUDE_TEST_STATE_DIR}/approved"
-printf "src/main.sh\nlib/utils.sh\n" > "${CLAUDE_TEST_STATE_DIR}/scope"
-run_hook "$REQUIRE" "$(json_pretooluse Edit /project/src/main.sh)"
-assert_exit_code 0 && assert_output_not_contains '"deny"' && pass
+PLAN_FILE="${HOME}/.claude/plans/scope-doc-plan.md"
+write_plan \
+    "$PLAN_FILE" \
+    "Update the current hook guide in one approved markdown file for scope testing." \
+    "- /project/src/main.md" \
+    "The in-scope markdown edit passes the approval gate." \
+    "Per /Users/shingi/.claude/CLAUDE.md, this test uses the existing scope rules with a documentation-only file." \
+    "I read the current gate scripts and verified this markdown path should bypass the TDD production-file checks."
+seed_approval_bundle_from_plan "$PLAN_FILE"
+run_hook "$REQUIRE" "$(json_pretooluse Edit /project/src/main.md)"
+assert_json_field '.hookSpecificOutput.permissionDecision' 'allow' && pass
 teardown
 
 begin_test "2.5 Scope enforcement: out-of-scope → deny"
-TOTAL=$(( TOTAL ))  # already incremented by begin_test
 setup
-echo "1" > "${CLAUDE_TEST_STATE_DIR}/approved"
-printf "src/main.sh\nlib/utils.sh\n" > "${CLAUDE_TEST_STATE_DIR}/scope"
-run_hook "$REQUIRE" "$(json_pretooluse Edit /project/tests/bad.sh)"
+PLAN_FILE="${HOME}/.claude/plans/scope-deny-plan.md"
+write_plan \
+    "$PLAN_FILE" \
+    "Update one approved documentation file and reject edits outside the scope." \
+    "- /project/src/main.md" \
+    "Only the scoped markdown file can be edited." \
+    "Per /Users/shingi/.claude/CLAUDE.md, scope is fail-closed and should block out-of-scope edits." \
+    "I read the current scope gate and verified the exact file path must match the approved scope."
+seed_approval_bundle_from_plan "$PLAN_FILE"
+run_hook "$REQUIRE" "$(json_pretooluse Edit /project/tests/bad.md)"
 if assert_json_field '.hookSpecificOutput.permissionDecision' 'deny'; then
     pass
 fi
 teardown
 
-# 2.6 Context injection on first edit
 begin_test "2.6 Context injection on first edit"
 setup
-echo "1" > "${CLAUDE_TEST_STATE_DIR}/approved"
-echo "Build the widget" > "${CLAUDE_TEST_STATE_DIR}/objective"
-echo "src/widget.sh" > "${CLAUDE_TEST_STATE_DIR}/scope"
-echo "Widget works" > "${CLAUDE_TEST_STATE_DIR}/criteria"
-run_hook "$REQUIRE" "$(json_pretooluse Edit /project/src/widget.sh)"
+PLAN_FILE="${HOME}/.claude/plans/context-plan.md"
+write_plan \
+    "$PLAN_FILE" \
+    "Build the widget guide in one approved markdown file with explicit success criteria." \
+    "- /project/src/widget.md" \
+    "The widget guide documents the current hook behavior correctly." \
+    "Per /Users/shingi/.claude/CLAUDE.md, the context should restate the approved objective and criteria during editing." \
+    "I read the current approval gate and verified the allow response injects objective, scope, criteria, and the edit counter."
+seed_approval_bundle_from_plan "$PLAN_FILE"
+run_hook "$REQUIRE" "$(json_pretooluse Edit /project/src/widget.md)"
 if assert_json_field '.hookSpecificOutput.permissionDecision' 'allow'; then
-    assert_output_contains "OBJECTIVE" && pass
+    assert_output_contains "OBJECTIVE" \
+        && assert_output_contains "SUCCESS CRITERIA" \
+        && assert_output_contains "Edit #1" \
+        && pass
 fi
 teardown
 
@@ -287,54 +355,57 @@ printf "\n${YELLOW}── Group 3: approve_plan.sh ──${NC}\n"
 
 APPROVE="${SCRIPTS_DIR}/approve_plan.sh"
 
-# 3.1 Creates approved in both dirs
-begin_test "3.1 Creates approved in STATE_DIR and PERSIST_DIR"
+begin_test "3.1 approve_plan backfills approval bundle from plan file"
 setup
+PLAN_FILE="${HOME}/.claude/plans/approve-plan-backfill.md"
+write_plan \
+    "$PLAN_FILE" \
+    "Backfill approval metadata from the newest plan file for the current project." \
+    "- /tmp/approved-doc.md" \
+    "The approval bundle is rebuilt from plan metadata." \
+    "Per /Users/shingi/.claude/README.md, approve_plan.sh is the current PostToolUse fallback for state consistency." \
+    "I read the current approval scripts and verified this path should rebuild the persistent approval bundle."
 run_hook "$APPROVE" "$(json_posttooluse ExitPlanMode)"
-assert_file_exists "${CLAUDE_TEST_STATE_DIR}/approved" "state/approved" \
-    && assert_file_exists "${CLAUDE_TEST_PERSIST_DIR}/approved" "persist/approved" \
+assert_file_exists "${CLAUDE_TEST_PERSIST_DIR}/approved" "approved marker" \
+    && assert_file_exists "${CLAUDE_TEST_PERSIST_DIR}/plan_hash" "plan_hash marker" \
+    && assert_file_exists "${CLAUDE_TEST_PERSIST_DIR}/plan_file" "plan_file marker" \
     && pass
 teardown
 
-# 3.2 Extracts objective/scope/criteria from plan file
-begin_test "3.2 Extracts plan sections into state files"
+begin_test "3.2 approve_plan extracts objective, scope, and criteria"
 setup
-# Create a plan file and record its path in state
-PLAN_DIR="${TEST_TMPDIR}/plans"
-mkdir -p "$PLAN_DIR"
-PLAN_FILE="${PLAN_DIR}/test-plan.md"
-cat > "$PLAN_FILE" <<'PLAN'
-## Objective
-Build a test harness for validating hook behavior end-to-end.
-
-## Scope
-- ~/.claude/scripts/tests/test_hooks.sh
-
-## Success Criteria
-All 21 tests pass with zero failures when run via bash.
-
-## Justification
-Per CLAUDE.md rule 5, we must validate. This follows existing patterns in scripts/.
-PLAN
-echo "$PLAN_FILE" > "${CLAUDE_TEST_STATE_DIR}/plan_file"
+PLAN_FILE="${HOME}/.claude/plans/approve-plan-sections.md"
+write_plan \
+    "$PLAN_FILE" \
+    "Build a test harness for validating hook behavior end to end in documentation." \
+    "- /tmp/test_hooks.md" \
+    "The test harness documentation is extracted into approval state files." \
+    "Per /Users/shingi/.claude/CLAUDE.md, approval metadata should reflect the current plan sections exactly." \
+    "I read the current extraction helpers and verified objective, scope, and criteria are persisted from the plan."
 run_hook "$APPROVE" "$(json_posttooluse ExitPlanMode)"
-assert_file_exists "${CLAUDE_TEST_STATE_DIR}/objective" \
-    && assert_file_contains "${CLAUDE_TEST_STATE_DIR}/objective" "test harness" \
-    && assert_file_exists "${CLAUDE_TEST_STATE_DIR}/scope" \
-    && assert_file_contains "${CLAUDE_TEST_STATE_DIR}/scope" "test_hooks.sh" \
-    && assert_file_exists "${CLAUDE_TEST_PERSIST_DIR}/objective" \
+assert_file_exists "${CLAUDE_TEST_PERSIST_DIR}/objective" \
+    && assert_file_contains "${CLAUDE_TEST_PERSIST_DIR}/objective" "test harness" \
     && assert_file_exists "${CLAUDE_TEST_PERSIST_DIR}/scope" \
+    && assert_file_contains "${CLAUDE_TEST_PERSIST_DIR}/scope" "/tmp/test_hooks.md" \
+    && assert_file_exists "${CLAUDE_TEST_PERSIST_DIR}/criteria" \
     && pass
 teardown
 
-# 3.3 Cleans up planning and explore_count
-begin_test "3.3 Cleans up planning and explore_count"
+begin_test "3.3 approve_plan clears planning markers"
 setup
-echo "1" > "${CLAUDE_TEST_STATE_DIR}/planning"
-echo "5" > "${CLAUDE_TEST_STATE_DIR}/explore_count"
+echo "1" > "${CLAUDE_TEST_PERSIST_DIR}/planning"
+echo "$(date +%s)" > "${CLAUDE_TEST_PERSIST_DIR}/planning_started_at"
+PLAN_FILE="${HOME}/.claude/plans/approve-plan-cleanup.md"
+write_plan \
+    "$PLAN_FILE" \
+    "Clear planning markers after approval metadata is rebuilt from the current plan." \
+    "- /tmp/cleanup-doc.md" \
+    "Planning markers are removed when approval succeeds." \
+    "Per /Users/shingi/.claude/README.md, the approval fallback should leave the project out of planning mode." \
+    "I read the current PostToolUse approval script and verified it removes planning and planning_started_at."
 run_hook "$APPROVE" "$(json_posttooluse ExitPlanMode)"
-assert_file_missing "${CLAUDE_TEST_STATE_DIR}/planning" \
-    && assert_file_missing "${CLAUDE_TEST_STATE_DIR}/explore_count" \
+assert_file_missing "${CLAUDE_TEST_PERSIST_DIR}/planning" "planning marker cleaned" \
+    && assert_file_missing "${CLAUDE_TEST_PERSIST_DIR}/planning_started_at" "planning_started_at cleaned" \
     && pass
 teardown
 
@@ -345,96 +416,79 @@ printf "\n${YELLOW}── Group 4: clear_plan_on_new_task.sh ──${NC}\n"
 
 CLEAR_TASK="${SCRIPTS_DIR}/clear_plan_on_new_task.sh"
 
-# 4.1 Clears stale approval from both dirs (approval > 30 min old)
-begin_test "4.1 Clears stale approval from STATE_DIR and PERSIST_DIR"
+begin_test "4.1 clear_plan_on_new_task clears approval and validation markers"
 setup
-echo "1" > "${CLAUDE_TEST_STATE_DIR}/approved"
-echo "obj" > "${CLAUDE_TEST_STATE_DIR}/objective"
-echo "sc" > "${CLAUDE_TEST_STATE_DIR}/scope"
-echo "cr" > "${CLAUDE_TEST_STATE_DIR}/criteria"
 echo "1" > "${CLAUDE_TEST_PERSIST_DIR}/approved"
 echo "obj" > "${CLAUDE_TEST_PERSIST_DIR}/objective"
 echo "sc" > "${CLAUDE_TEST_PERSIST_DIR}/scope"
 echo "cr" > "${CLAUDE_TEST_PERSIST_DIR}/criteria"
-# Backdate the persist/approved file to 31 minutes ago
-touch -t "$(date -v-31M '+%Y%m%d%H%M.%S')" "${CLAUDE_TEST_PERSIST_DIR}/approved"
+echo "1" > "${CLAUDE_TEST_PERSIST_DIR}/objective_verification_required"
+echo "verify" > "${CLAUDE_TEST_PERSIST_DIR}/objective_verification"
+echo "ts" > "${CLAUDE_TEST_PERSIST_DIR}/objective_verified"
+echo "hash" > "${CLAUDE_TEST_PERSIST_DIR}/objective_verified_hash"
+echo "pending" > "${CLAUDE_TEST_PERSIST_DIR}/accept_bypass_pending"
+echo "user" > "${CLAUDE_TEST_PERSIST_DIR}/user_bypass"
+echo "dirty" > "${CLAUDE_TEST_PERSIST_DIR}/dirty"
+echo "unit" > "${CLAUDE_TEST_PERSIST_DIR}/validated_unit"
+echo "e2e" > "${CLAUDE_TEST_PERSIST_DIR}/validated_e2e"
+echo "red" > "${CLAUDE_TEST_PERSIST_DIR}/tests_failed"
+echo "1" > "${CLAUDE_TEST_PERSIST_DIR}/tests_reviewed"
 run_hook "$CLEAR_TASK" "$(json_posttooluse EnterPlanMode)"
-assert_file_missing "${CLAUDE_TEST_STATE_DIR}/approved" \
-    && assert_file_missing "${CLAUDE_TEST_STATE_DIR}/objective" \
-    && assert_file_missing "${CLAUDE_TEST_PERSIST_DIR}/approved" \
-    && assert_file_missing "${CLAUDE_TEST_PERSIST_DIR}/objective" \
+assert_file_missing "${CLAUDE_TEST_PERSIST_DIR}/approved" \
+    && assert_file_missing "${CLAUDE_TEST_PERSIST_DIR}/objective_verification_required" \
+    && assert_file_missing "${CLAUDE_TEST_PERSIST_DIR}/objective_verified" \
+    && assert_file_missing "${CLAUDE_TEST_PERSIST_DIR}/accept_bypass_pending" \
+    && assert_file_missing "${CLAUDE_TEST_PERSIST_DIR}/user_bypass" \
+    && assert_file_missing "${CLAUDE_TEST_PERSIST_DIR}/dirty" \
+    && assert_file_missing "${CLAUDE_TEST_PERSIST_DIR}/validated_unit" \
+    && assert_file_missing "${CLAUDE_TEST_PERSIST_DIR}/tests_failed" \
     && pass
 teardown
 
-# 4.1b Preserves fresh persistent approval (< 30 min old)
-begin_test "4.1b Preserves fresh persist approval on EnterPlanMode"
+begin_test "4.2 clear_plan_on_new_task creates planning markers"
 setup
-echo "1" > "${CLAUDE_TEST_STATE_DIR}/approved"
-echo "obj" > "${CLAUDE_TEST_STATE_DIR}/objective"
-echo "1" > "${CLAUDE_TEST_PERSIST_DIR}/approved"
-echo "obj" > "${CLAUDE_TEST_PERSIST_DIR}/objective"
-echo "sc" > "${CLAUDE_TEST_PERSIST_DIR}/scope"
-echo "cr" > "${CLAUDE_TEST_PERSIST_DIR}/criteria"
-# persist/approved is fresh (just created) — should be preserved
 run_hook "$CLEAR_TASK" "$(json_posttooluse EnterPlanMode)"
-assert_file_missing "${CLAUDE_TEST_STATE_DIR}/approved" \
-    && assert_file_exists "${CLAUDE_TEST_PERSIST_DIR}/approved" "persist/approved preserved" \
-    && assert_file_exists "${CLAUDE_TEST_PERSIST_DIR}/objective" "persist/objective preserved" \
+assert_file_exists "${CLAUDE_TEST_PERSIST_DIR}/planning" "planning marker" \
+    && assert_file_exists "${CLAUDE_TEST_PERSIST_DIR}/planning_started_at" "planning_started_at marker" \
     && pass
 teardown
 
-# 4.2 Creates planning and explore_count markers
-begin_test "4.2 Creates planning + explore_count markers"
+begin_test "4.3 clear_plan_on_new_task clears validation_log and approval_token"
 setup
+echo "log entry" > "${CLAUDE_TEST_PERSIST_DIR}/validation_log"
+echo "token-123" > "${CLAUDE_TEST_PERSIST_DIR}/approval_token"
 run_hook "$CLEAR_TASK" "$(json_posttooluse EnterPlanMode)"
-assert_file_exists "${CLAUDE_TEST_STATE_DIR}/planning" \
-    && assert_file_contains "${CLAUDE_TEST_STATE_DIR}/explore_count" "0" \
+assert_file_missing "${CLAUDE_TEST_PERSIST_DIR}/validation_log" "validation_log cleaned" \
+    && assert_file_missing "${CLAUDE_TEST_PERSIST_DIR}/approval_token" "approval_token cleaned" \
     && pass
 teardown
 
 # ══════════════════════════════════════════════════════════════════
-# GROUP 5: track_exploration.sh
+# GROUP 5: track_dirty.sh
 # ══════════════════════════════════════════════════════════════════
-printf "\n${YELLOW}── Group 5: track_exploration.sh ──${NC}\n"
+printf "\n${YELLOW}── Group 5: track_dirty.sh ──${NC}\n"
 
-TRACK="${SCRIPTS_DIR}/track_exploration.sh"
+TRACK_DIRTY="${SCRIPTS_DIR}/track_dirty.sh"
 
-# 5.1 Increments explore_count
-begin_test "5.1 Increments explore_count on Read"
+begin_test "5.1 track_dirty sets dirty marker on normal edit"
 setup
-echo "1" > "${CLAUDE_TEST_STATE_DIR}/planning"
-echo "0" > "${CLAUDE_TEST_STATE_DIR}/explore_count"
-run_hook "$TRACK" "$(json_pretooluse Read /some/file.sh)"
-run_hook "$TRACK" "$(json_pretooluse Grep "" "*.sh" /some/dir)"
-run_hook "$TRACK" "$(json_pretooluse Read /another/file.sh)"
-COUNT=$(cat "${CLAUDE_TEST_STATE_DIR}/explore_count")
-if [[ "$COUNT" -eq 3 ]]; then
-    pass
-else
-    fail "Expected explore_count=3, got $COUNT"
-fi
-teardown
-
-# 5.2 Appends to exploration_log with correct format
-begin_test "5.2 Appends to exploration_log"
-setup
-echo "1" > "${CLAUDE_TEST_STATE_DIR}/planning"
-echo "0" > "${CLAUDE_TEST_STATE_DIR}/explore_count"
-run_hook "$TRACK" "$(json_pretooluse Read /path/to/main.sh)"
-run_hook "$TRACK" "$(json_pretooluse Grep "" "TODO" /src)"
-assert_file_exists "${CLAUDE_TEST_STATE_DIR}/exploration_log" \
-    && assert_file_contains "${CLAUDE_TEST_STATE_DIR}/exploration_log" "READ: /path/to/main.sh" \
-    && assert_file_contains "${CLAUDE_TEST_STATE_DIR}/exploration_log" "SEARCH: TODO" \
+run_hook "$TRACK_DIRTY" "$(json_pretooluse Edit /some/file.py)"
+assert_file_exists "${CLAUDE_TEST_PERSIST_DIR}/dirty" "dirty marker" \
+    && assert_file_contains "${CLAUDE_TEST_PERSIST_DIR}/dirty" "/some/file.py" \
     && pass
 teardown
 
-# 5.3 No-op when not in planning mode
-begin_test "5.3 No-op when not in planning mode"
+begin_test "5.2 track_dirty ignores plan files"
 setup
-# No planning marker
-run_hook "$TRACK" "$(json_pretooluse Read /tmp/whatever.sh)"
-assert_file_missing "${CLAUDE_TEST_STATE_DIR}/explore_count" "explore_count absent" \
-    && assert_file_missing "${CLAUDE_TEST_STATE_DIR}/exploration_log" "exploration_log absent" \
+run_hook "$TRACK_DIRTY" "$(json_pretooluse Edit ${HOME}/.claude/plans/test-plan.md)"
+assert_file_missing "${CLAUDE_TEST_PERSIST_DIR}/dirty" "dirty should not be set for plan edits" \
+    && pass
+teardown
+
+begin_test "5.3 track_dirty ignores memory files"
+setup
+run_hook "$TRACK_DIRTY" "$(json_pretooluse Edit ${HOME}/.claude/projects/demo/memory/MEMORY.md)"
+assert_file_missing "${CLAUDE_TEST_PERSIST_DIR}/dirty" "dirty should not be set for memory edits" \
     && pass
 teardown
 
@@ -443,61 +497,57 @@ teardown
 # ══════════════════════════════════════════════════════════════════
 printf "\n${YELLOW}── Group 6: Standalone scripts ──${NC}\n"
 
-# 6.1 restore_approval.sh
-begin_test "6.1 restore_approval.sh creates approved"
+begin_test "6.1 restore_approval.sh creates approval bundle"
 setup
-# Create a fake session subdir under HOOKS_DIR
-mkdir -p "${CLAUDE_TEST_HOOKS_DIR}/session-abc"
-run_hook "${SCRIPTS_DIR}/restore_approval.sh" ""
-assert_file_exists "${CLAUDE_TEST_PERSIST_DIR}/approved" "persist/approved" \
-    && assert_file_exists "${CLAUDE_TEST_HOOKS_DIR}/session-abc/approved" "session/approved" \
+PLAN_FILE="${HOME}/.claude/plans/_test_restore_approval.md"
+write_plan \
+    "$PLAN_FILE" \
+    "Restore approval from the current plan for a standalone workflow test." \
+    "- /tmp/test.txt" \
+    "Approval metadata is rebuilt from the current plan." \
+    "Per /Users/shingi/.claude/commands/approve.md, /approve routes through restore_approval.sh for current plan approval." \
+    "I read the current restore script and verified it rebuilds approval metadata from the newest plan file." \
+    "Run echo ok against the real shell and verify the output."
+run_script bash "${SCRIPTS_DIR}/restore_approval.sh"
+assert_exit_code 0 \
+    && assert_file_exists "${CLAUDE_TEST_PERSIST_DIR}/approved" "persist/approved" \
+    && assert_file_exists "${CLAUDE_TEST_PERSIST_DIR}/plan_hash" "plan_hash" \
+    && assert_file_exists "${CLAUDE_TEST_PERSIST_DIR}/objective_verification" "objective_verification" \
     && pass
 teardown
 
-# 6.2 accept_outcome.sh
-begin_test "6.2 accept_outcome.sh clears approval"
+begin_test "6.2 accept_outcome.sh --finalize clears approval"
 setup
-mkdir -p "${CLAUDE_TEST_HOOKS_DIR}/session-xyz"
 echo "1" > "${CLAUDE_TEST_PERSIST_DIR}/approved"
 echo "obj" > "${CLAUDE_TEST_PERSIST_DIR}/objective"
-echo "1" > "${CLAUDE_TEST_HOOKS_DIR}/session-xyz/approved"
-echo "obj" > "${CLAUDE_TEST_HOOKS_DIR}/session-xyz/objective"
-run_hook "${SCRIPTS_DIR}/accept_outcome.sh" ""
-assert_file_missing "${CLAUDE_TEST_PERSIST_DIR}/approved" \
+echo "0" > "${CLAUDE_TEST_PERSIST_DIR}/objective_verification_required"
+run_script bash "${SCRIPTS_DIR}/accept_outcome.sh" --finalize
+assert_exit_code 0 \
+    && assert_file_missing "${CLAUDE_TEST_PERSIST_DIR}/approved" \
     && assert_file_missing "${CLAUDE_TEST_PERSIST_DIR}/objective" \
-    && assert_file_missing "${CLAUDE_TEST_HOOKS_DIR}/session-xyz/approved" \
-    && assert_file_missing "${CLAUDE_TEST_HOOKS_DIR}/session-xyz/objective" \
     && pass
 teardown
 
-# 6.3 reject_outcome.sh
 begin_test "6.3 reject_outcome.sh clears approval"
 setup
-mkdir -p "${CLAUDE_TEST_HOOKS_DIR}/session-rej"
 echo "1" > "${CLAUDE_TEST_PERSIST_DIR}/approved"
 echo "sc" > "${CLAUDE_TEST_PERSIST_DIR}/scope"
-echo "1" > "${CLAUDE_TEST_HOOKS_DIR}/session-rej/approved"
-echo "sc" > "${CLAUDE_TEST_HOOKS_DIR}/session-rej/scope"
-run_hook "${SCRIPTS_DIR}/reject_outcome.sh" ""
-assert_file_missing "${CLAUDE_TEST_PERSIST_DIR}/approved" \
+run_script bash "${SCRIPTS_DIR}/reject_outcome.sh"
+assert_exit_code 0 \
+    && assert_file_missing "${CLAUDE_TEST_PERSIST_DIR}/approved" \
     && assert_file_missing "${CLAUDE_TEST_PERSIST_DIR}/scope" \
-    && assert_file_missing "${CLAUDE_TEST_HOOKS_DIR}/session-rej/approved" \
     && pass
 teardown
 
-# 6.4 clear_approval.sh
 begin_test "6.4 clear_approval.sh clears all state"
 setup
-mkdir -p "${CLAUDE_TEST_HOOKS_DIR}/session-clr"
 echo "1" > "${CLAUDE_TEST_PERSIST_DIR}/approved"
 echo "crit" > "${CLAUDE_TEST_PERSIST_DIR}/criteria"
-echo "1" > "${CLAUDE_TEST_HOOKS_DIR}/session-clr/approved"
-echo "crit" > "${CLAUDE_TEST_HOOKS_DIR}/session-clr/criteria"
-run_hook "${SCRIPTS_DIR}/clear_approval.sh" ""
-assert_file_missing "${CLAUDE_TEST_PERSIST_DIR}/approved" \
+echo "0" > "${CLAUDE_TEST_PERSIST_DIR}/objective_verification_required"
+run_script bash "${SCRIPTS_DIR}/clear_approval.sh"
+assert_exit_code 0 \
+    && assert_file_missing "${CLAUDE_TEST_PERSIST_DIR}/approved" \
     && assert_file_missing "${CLAUDE_TEST_PERSIST_DIR}/criteria" \
-    && assert_file_missing "${CLAUDE_TEST_HOOKS_DIR}/session-clr/approved" \
-    && assert_file_missing "${CLAUDE_TEST_HOOKS_DIR}/session-clr/criteria" \
     && pass
 teardown
 
@@ -509,158 +559,129 @@ printf "\n${YELLOW}── Group 7: Workflow integration tests ──${NC}\n"
 APPROVE="${SCRIPTS_DIR}/approve_plan.sh"
 REQUIRE="${SCRIPTS_DIR}/require_plan_approval.sh"
 CLEAR_TASK="${SCRIPTS_DIR}/clear_plan_on_new_task.sh"
-
-# 7.1 Happy path: EnterPlanMode → approve → Edit allowed
-begin_test "7.1 Full workflow: plan → approve → edit allowed"
-setup
-# Step 1: EnterPlanMode clears state and starts planning
-run_hook "$CLEAR_TASK" "$(json_posttooluse EnterPlanMode)"
-# Step 2: Simulate exploration (track_exploration increments count)
-echo "1" > "${CLAUDE_TEST_STATE_DIR}/planning"
-run_hook "${SCRIPTS_DIR}/track_exploration.sh" "$(json_pretooluse Read /some/readme.md)"
-run_hook "${SCRIPTS_DIR}/track_exploration.sh" "$(json_pretooluse Grep "" "pattern" /src)"
-run_hook "${SCRIPTS_DIR}/track_exploration.sh" "$(json_pretooluse Read /some/main.sh)"
-# Step 3: approve_plan.sh (PostToolUse on ExitPlanMode) creates approval
-run_hook "$APPROVE" "$(json_posttooluse ExitPlanMode)"
-# Step 4: Edit should now be allowed
-run_hook "$REQUIRE" "$(json_pretooluse Edit /some/file.sh)"
-assert_exit_code 0 && assert_output_not_contains '"deny"' && pass
-teardown
-
-# 7.2 Cross-session persistence: approve → destroy session → new session → Edit allowed
-begin_test "7.2 Cross-session: approve persists, hydration restores"
-setup
-# Session A: approve a plan
-run_hook "$APPROVE" "$(json_posttooluse ExitPlanMode)"
-assert_file_exists "${CLAUDE_TEST_PERSIST_DIR}/approved" "persist written"
-# Session A ends: destroy session state (simulates cleanup_session.sh)
-rm -rf "${CLAUDE_TEST_STATE_DIR}"
-mkdir -p "${CLAUDE_TEST_STATE_DIR}"
-# Session B: new session, empty STATE_DIR — init_hook should hydrate from PERSIST_DIR
-run_hook "$REQUIRE" "$(json_pretooluse Edit /some/file.sh)"
-assert_exit_code 0 && assert_output_not_contains '"deny"' && pass
-teardown
-
-# 7.3 Recovery loop broken: Edit blocked → EnterPlanMode → persist survives
-begin_test "7.3 Fresh approval survives EnterPlanMode (loop breaker)"
-setup
-# Approval exists in persist (fresh, < 30 min)
-echo "1" > "${CLAUDE_TEST_PERSIST_DIR}/approved"
-echo "obj" > "${CLAUDE_TEST_PERSIST_DIR}/objective"
-echo "sc" > "${CLAUDE_TEST_PERSIST_DIR}/scope"
-# Model enters plan mode as recovery — persist should survive
-run_hook "$CLEAR_TASK" "$(json_posttooluse EnterPlanMode)"
-# Persist approval should still exist
-assert_file_exists "${CLAUDE_TEST_PERSIST_DIR}/approved" "persist/approved survived" && pass
-teardown
-
-# 7.4 Destructive loop prevented: blocked → EnterPlanMode → re-approve → edit works
-begin_test "7.4 Recovery: blocked → plan mode → approve → edit works"
-setup
-# Start with no approval — Edit is blocked
-run_hook "$REQUIRE" "$(json_pretooluse Edit /some/file.sh)"
-assert_json_field '.hookSpecificOutput.permissionDecision' 'deny'
-# Model enters plan mode
-run_hook "$CLEAR_TASK" "$(json_posttooluse EnterPlanMode)"
-# Model explores and gets plan approved
-run_hook "$APPROVE" "$(json_posttooluse ExitPlanMode)"
-# Now Edit should work
-run_hook "$REQUIRE" "$(json_pretooluse Edit /some/file.sh)"
-assert_exit_code 0 && assert_output_not_contains '"deny"' && pass
-teardown
-
-# 7.5 restore_approval.sh → Edit works without entering plan mode
-begin_test "7.5 restore_approval → edit works (no plan mode needed)"
-setup
-# No approval exists
-run_hook "$REQUIRE" "$(json_pretooluse Edit /some/file.sh)"
-assert_json_field '.hookSpecificOutput.permissionDecision' 'deny'
-# User runs restore_approval.sh
-run_hook "${SCRIPTS_DIR}/restore_approval.sh" ""
-# Edit should now work (init_hook hydrates from persist)
-run_hook "$REQUIRE" "$(json_pretooluse Edit /some/file.sh)"
-assert_exit_code 0 && assert_output_not_contains '"deny"' && pass
-teardown
-
-# 7.6 BLOCKED message: with plan file → suggests ExitPlanMode, not EnterPlanMode
-begin_test "7.6 BLOCKED with existing plan → suggests ExitPlanMode"
-setup
-# Create a plan file
-mkdir -p "${HOME}/.claude/plans"
-TEMP_PLAN="${HOME}/.claude/plans/_test_plan_7_6.md"
-echo "test plan" > "$TEMP_PLAN"
-run_hook "$REQUIRE" "$(json_pretooluse Edit /some/file.sh)"
-assert_output_contains "call ExitPlanMode to get it approved" \
-    && assert_output_not_contains "REQUIRED WORKFLOW" \
-    && pass
-rm -f "$TEMP_PLAN"
-teardown
-
-# 7.7 BLOCKED message: no plan file → suggests full EnterPlanMode workflow
-begin_test "7.7 BLOCKED without plan file → suggests EnterPlanMode"
-setup
-# Ensure no plan files exist (move any aside)
-PLAN_BAK=""
-for pf in "${HOME}/.claude/plans/"*.md; do
-    if [[ -f "$pf" ]]; then
-        PLAN_BAK="$pf"
-        mv "$pf" "${pf}.test_bak"
-    fi
-done
-run_hook "$REQUIRE" "$(json_pretooluse Edit /some/file.sh)"
-assert_output_contains "EnterPlanMode" && pass
-# Restore any backed-up plan files
-for bak in "${HOME}/.claude/plans/"*.test_bak; do
-    [[ -f "$bak" ]] && mv "$bak" "${bak%.test_bak}"
-done
-teardown
-
-# 7.8 PreToolUse approval creation (validate_plan_quality.sh creates approval directly)
-begin_test "7.8 validate_plan_quality creates approval in PreToolUse"
-setup
 VALIDATE="${SCRIPTS_DIR}/validate_plan_quality.sh"
-# Set up planning state with sufficient exploration
-echo "1" > "${CLAUDE_TEST_STATE_DIR}/planning"
-echo "5" > "${CLAUDE_TEST_STATE_DIR}/explore_count"
-# Create exploration log referencing files mentioned in plan
-echo "READ: /some/validate_plan_quality.sh" > "${CLAUDE_TEST_STATE_DIR}/exploration_log"
-echo "READ: /some/approve_plan.sh" >> "${CLAUDE_TEST_STATE_DIR}/exploration_log"
-echo "SEARCH: hooks | /some/scripts" >> "${CLAUDE_TEST_STATE_DIR}/exploration_log"
-# Also persist planning state (for hydration)
-echo "1" > "${CLAUDE_TEST_PERSIST_DIR}/planning"
-echo "5" > "${CLAUDE_TEST_PERSIST_DIR}/explore_count"
-# Create a valid plan file directly in ~/.claude/plans/
-TEMP_PLAN="${HOME}/.claude/plans/_test_plan_78.md"
-cat > "$TEMP_PLAN" <<'PLAN'
-# Test Plan SEP-001
 
-## Objective
-Fix the approval workflow so validate_plan_quality creates approval markers directly in PreToolUse.
-
-## Scope
-- ~/.claude/scripts/validate_plan_quality.sh
-- ~/.claude/scripts/approve_plan.sh
-
-## Success Criteria
-After ExitPlanMode passes validation, approved marker exists in both session and persistent state.
-
-## Justification
-Per CLAUDE.md workflow documentation, ExitPlanMode should unlock editing immediately. This follows existing patterns in scripts/.
-PLAN
-# Run the validation hook (PreToolUse on ExitPlanMode)
+begin_test "7.1 Full workflow: EnterPlanMode → validate → edit allowed"
+setup
+run_hook "$CLEAR_TASK" "$(json_posttooluse EnterPlanMode)"
+PLAN_FILE="${HOME}/.claude/plans/workflow-doc-plan.md"
+write_plan \
+    "$PLAN_FILE" \
+    "Implements SEP-101 by updating the current workflow documentation in one approved markdown file after planning." \
+    "- /some/file.md" \
+    "The scoped documentation edit is allowed after validate_plan_quality approves the plan." \
+    "Per /Users/shingi/.claude/CLAUDE.md, this follows the current planning workflow and stays inside the approved scope." \
+    "I read the current hook scripts and existing documentation and verified this plan reflects the current codebase, the current workflow, and the active approval rules."
 run_hook "$VALIDATE" "$(json_pretooluse ExitPlanMode)"
-rm -f "$TEMP_PLAN"
-# Verify approval was created by PreToolUse (not PostToolUse)
-assert_file_exists "${CLAUDE_TEST_STATE_DIR}/approved" "state/approved created by PreToolUse" \
-    && assert_file_exists "${CLAUDE_TEST_PERSIST_DIR}/approved" "persist/approved created by PreToolUse" \
-    && assert_file_exists "${CLAUDE_TEST_STATE_DIR}/objective" "state/objective extracted" \
-    && assert_file_exists "${CLAUDE_TEST_STATE_DIR}/scope" "state/scope extracted" \
-    && assert_file_exists "${CLAUDE_TEST_STATE_DIR}/criteria" "state/criteria extracted" \
-    && assert_file_missing "${CLAUDE_TEST_STATE_DIR}/planning" "planning cleaned up" \
-    && assert_file_missing "${CLAUDE_TEST_STATE_DIR}/explore_count" "explore_count cleaned up" \
-    && assert_output_not_contains "/approve" \
-    && assert_output_contains "Editing unlocked" \
+run_hook "$REQUIRE" "$(json_pretooluse Edit /some/file.md)"
+assert_json_field '.hookSpecificOutput.permissionDecision' 'allow' && pass
+teardown
+
+begin_test "7.2 restore_approval enables editing from the current plan"
+setup
+PLAN_FILE="${HOME}/.claude/plans/restore-flow-plan.md"
+write_plan \
+    "$PLAN_FILE" \
+    "Restore approval for the current documentation change using the user approval flow." \
+    "- /restore/file.md" \
+    "The restored approval bundle allows the scoped markdown edit." \
+    "Per /Users/shingi/.claude/commands/approve.md, the user approval command restores approval from the current plan." \
+    "I read the current approval command flow and verified restore_approval.sh rebuilds the bundle without plan mode state."
+run_script bash "${SCRIPTS_DIR}/restore_approval.sh"
+run_hook "$REQUIRE" "$(json_pretooluse Edit /restore/file.md)"
+assert_json_field '.hookSpecificOutput.permissionDecision' 'allow' && pass
+teardown
+
+begin_test "7.3 EnterPlanMode clears previous approval and starts a new plan cycle"
+setup
+PLAN_FILE="${HOME}/.claude/plans/old-approved-plan.md"
+write_plan \
+    "$PLAN_FILE" \
+    "Seed an approved documentation plan and then start a fresh planning cycle." \
+    "- /old/file.md" \
+    "The old approval bundle is cleared when a new plan cycle begins." \
+    "Per /Users/shingi/.claude/SDLC.md, EnterPlanMode clears prior approval before starting a new task." \
+    "I read the current new-task hook and verified it removes approval state before writing planning markers."
+seed_approval_bundle_from_plan "$PLAN_FILE"
+run_hook "$CLEAR_TASK" "$(json_posttooluse EnterPlanMode)"
+assert_file_missing "${CLAUDE_TEST_PERSIST_DIR}/approved" "approved should be cleared" \
+    && assert_file_exists "${CLAUDE_TEST_PERSIST_DIR}/planning" "planning should be active" \
     && pass
+teardown
+
+begin_test "7.4 Recovery: blocked edit → restore approval → edit works"
+setup
+PLAN_FILE="${HOME}/.claude/plans/recovery-plan.md"
+write_plan \
+    "$PLAN_FILE" \
+    "Recover from a blocked scoped edit by restoring approval from the current plan." \
+    "- /recover/file.md" \
+    "Editing works after the user approval flow rebuilds the bundle." \
+    "Per /Users/shingi/.claude/commands/approve.md, restore_approval.sh is the user-controlled recovery path for approval state." \
+    "I read the current recovery scripts and verified a blocked edit should succeed after restore_approval recreates the bundle."
+run_hook "$REQUIRE" "$(json_pretooluse Edit /recover/file.md)"
+assert_json_field '.hookSpecificOutput.permissionDecision' 'deny'
+run_script bash "${SCRIPTS_DIR}/restore_approval.sh"
+run_hook "$REQUIRE" "$(json_pretooluse Edit /recover/file.md)"
+assert_json_field '.hookSpecificOutput.permissionDecision' 'allow' && pass
+teardown
+
+begin_test "7.5 BLOCKED with existing plan → suggests ExitPlanMode"
+setup
+TEMP_PLAN="${HOME}/.claude/plans/_test_plan_7_5.md"
+echo "test plan" > "$TEMP_PLAN"
+run_hook "$REQUIRE" "$(json_pretooluse Edit /some/file.md)"
+assert_output_contains "Call ExitPlanMode to get it approved" \
+    && pass
+teardown
+
+begin_test "7.6 BLOCKED without plan file → suggests EnterPlanMode"
+setup
+run_hook "$REQUIRE" "$(json_pretooluse Edit /some/file.md)"
+assert_output_contains "EnterPlanMode" && pass
+teardown
+
+begin_test "7.7 validate_plan_quality creates approval and objective verification metadata"
+setup
+run_hook "$CLEAR_TASK" "$(json_posttooluse EnterPlanMode)"
+TEMP_PLAN="${HOME}/.claude/plans/_test_plan_7_7.md"
+write_plan \
+    "$TEMP_PLAN" \
+    "Implements SEP-102 by validating the current code-path approval flow and recording real end to end proof." \
+    "- /src/app.py" \
+    "Plan approval stores the objective verification command for the current code change." \
+    "Per /Users/shingi/.claude/CLAUDE.md, code-change plans must define real end to end objective verification." \
+    "I read the current validation and approval scripts and verified this code-change plan must persist objective proof instructions, scope metadata, and approval state for the current implementation." \
+    "Run python verify_real_system.py against the live service and confirm the objective works."
+run_hook "$VALIDATE" "$(json_pretooluse ExitPlanMode)"
+assert_file_exists "${CLAUDE_TEST_PERSIST_DIR}/approved" "approved created" \
+    && assert_file_contains "${CLAUDE_TEST_PERSIST_DIR}/objective_verification_required" "1" \
+    && assert_file_contains "${CLAUDE_TEST_PERSIST_DIR}/objective_verification" "python verify_real_system.py" \
+    && assert_file_missing "${CLAUDE_TEST_PERSIST_DIR}/planning" "planning cleaned up" \
+    && assert_output_contains "record objective verification" \
+    && pass
+teardown
+
+begin_test "7.8 approve_plan is idempotent after validate_plan_quality"
+setup
+run_hook "$CLEAR_TASK" "$(json_posttooluse EnterPlanMode)"
+TEMP_PLAN="${HOME}/.claude/plans/_test_plan_7_8.md"
+write_plan \
+    "$TEMP_PLAN" \
+    "Implements SEP-103 by approving the current documentation plan and keeping the bundle stable across both ExitPlanMode hooks." \
+    "- /tmp/idempotent.md" \
+    "Both ExitPlanMode hooks leave a coherent approval bundle in place." \
+    "Per /Users/shingi/.claude/README.md, validate_plan_quality approves first and approve_plan backfills only if needed." \
+    "I read the current ExitPlanMode scripts and verified approve_plan should preserve an already-complete bundle, matching the existing current approval flow and metadata rules."
+run_hook "$VALIDATE" "$(json_pretooluse ExitPlanMode)"
+FIRST_HASH="$(cat "${CLAUDE_TEST_PERSIST_DIR}/plan_hash" 2>/dev/null || true)"
+run_hook "$APPROVE" "$(json_posttooluse ExitPlanMode)"
+SECOND_HASH="$(cat "${CLAUDE_TEST_PERSIST_DIR}/plan_hash" 2>/dev/null || true)"
+if [[ -n "$FIRST_HASH" ]] && [[ "$FIRST_HASH" == "$SECOND_HASH" ]] && [[ -f "${CLAUDE_TEST_PERSIST_DIR}/approved" ]]; then
+    pass
+else
+    fail "plan_hash changed or approved marker missing after approve_plan"
+fi
 teardown
 
 # ══════════════════════════════════════════════════════════════════
@@ -1084,45 +1105,75 @@ assert_file_exists "${CLAUDE_TEST_PERSIST_DIR}/validated_e2e" "integration flag 
 teardown
 
 # 11.7 record_validation.sh without --force → rejected
-begin_test "11.7 record_validation.sh without --force → rejected"
+begin_test "11.7 record_validation.sh without flag → rejected"
 setup
 echo "manual test" > "${CLAUDE_TEST_PERSIST_DIR}/dirty"
 HOOK_OUTPUT=""
 HOOK_EXIT=0
 HOOK_OUTPUT=$(bash "$RECORD_VAL" "manual check" 2>&1) || HOOK_EXIT=$?
 assert_exit_code 1 \
-    && assert_output_contains "force" \
+    && assert_output_contains "requires a flag" \
     && assert_file_exists "${CLAUDE_TEST_PERSIST_DIR}/dirty" "dirty NOT cleared" \
     && pass
 teardown
 
-# 11.8 record_validation.sh --force → clears dirty (blanket override)
-begin_test "11.8 record_validation.sh --force → clears dirty"
+# 11.8 record_validation.sh --command blocks when command is not approved
+begin_test "11.8 record_validation.sh --command blocks when objective proof is unapproved"
 setup
-echo "force test" > "${CLAUDE_TEST_PERSIST_DIR}/dirty"
+echo "command test" > "${CLAUDE_TEST_PERSIST_DIR}/dirty"
+echo "hash-123" > "${CLAUDE_TEST_PERSIST_DIR}/plan_hash"
+echo "1" > "${CLAUDE_TEST_PERSIST_DIR}/objective_verification_required"
+cat > "${CLAUDE_TEST_PERSIST_DIR}/objective_verification" <<'EOF'
+Run `python verify_real_system.py` against the live service and confirm the objective works.
+EOF
+echo "2026-03-10T00:00:00Z pytest -k unit" > "${CLAUDE_TEST_PERSIST_DIR}/validation_log"
 HOOK_OUTPUT=""
 HOOK_EXIT=0
-HOOK_OUTPUT=$(bash "$RECORD_VAL" --force "manual override check" 2>&1) || HOOK_EXIT=$?
+HOOK_OUTPUT=$(bash "$RECORD_VAL" --command "pytest -k unit" 2>&1) || HOOK_EXIT=$?
+assert_exit_code 1 \
+    && assert_output_contains "not approved" \
+    && assert_file_exists "${CLAUDE_TEST_PERSIST_DIR}/dirty" "dirty still present" \
+    && pass
+teardown
+
+# 11.9 record_validation.sh --command records objective proof for approved command
+begin_test "11.9 record_validation.sh --command records approved objective proof"
+setup
+echo "objective proof" > "${CLAUDE_TEST_PERSIST_DIR}/dirty"
+echo "hash-123" > "${CLAUDE_TEST_PERSIST_DIR}/plan_hash"
+echo "1" > "${CLAUDE_TEST_PERSIST_DIR}/objective_verification_required"
+cat > "${CLAUDE_TEST_PERSIST_DIR}/objective_verification" <<'EOF'
+Run `python verify_real_system.py` against the live service and confirm the objective works.
+EOF
+echo "2026-03-10T00:00:00Z python verify_real_system.py" > "${CLAUDE_TEST_PERSIST_DIR}/validation_log"
+HOOK_OUTPUT=""
+HOOK_EXIT=0
+HOOK_OUTPUT=$(bash "$RECORD_VAL" --command "python verify_real_system.py" 2>&1) || HOOK_EXIT=$?
 assert_exit_code 0 \
     && assert_file_missing "${CLAUDE_TEST_PERSIST_DIR}/dirty" "dirty cleared" \
-    && assert_file_exists "${CLAUDE_TEST_PERSIST_DIR}/validated_unit" "validated_unit set" \
-    && assert_file_exists "${CLAUDE_TEST_PERSIST_DIR}/validated_e2e" "validated_e2e set" \
+    && assert_file_exists "${CLAUDE_TEST_PERSIST_DIR}/objective_verified" "objective_verified set" \
+    && assert_file_contains "${CLAUDE_TEST_PERSIST_DIR}/objective_verified_evidence" "python verify_real_system.py" \
+    && assert_file_contains "${CLAUDE_TEST_PERSIST_DIR}/validation_log" "OBJECTIVE VERIFIED" \
     && pass
 teardown
 
-# 11.9 record_validation.sh --force logs MANUAL OVERRIDE prefix
-begin_test "11.9 record_validation.sh --force → MANUAL OVERRIDE in log"
+# 11.10 record_validation.sh --manual leaves dirty and sets pending marker
+begin_test "11.10 record_validation.sh --manual sets pending without clearing dirty"
 setup
-echo "log test" > "${CLAUDE_TEST_PERSIST_DIR}/dirty"
+echo "manual pending" > "${CLAUDE_TEST_PERSIST_DIR}/dirty"
+echo "hash-123" > "${CLAUDE_TEST_PERSIST_DIR}/plan_hash"
 HOOK_OUTPUT=""
 HOOK_EXIT=0
-HOOK_OUTPUT=$(bash "$RECORD_VAL" --force "visual inspection" 2>&1) || HOOK_EXIT=$?
-assert_file_contains "${CLAUDE_TEST_PERSIST_DIR}/validation_log" "MANUAL OVERRIDE" \
+HOOK_OUTPUT=$(bash "$RECORD_VAL" --manual "user must verify the live endpoint" 2>&1) || HOOK_EXIT=$?
+assert_exit_code 0 \
+    && assert_file_exists "${CLAUDE_TEST_PERSIST_DIR}/dirty" "dirty still present" \
+    && assert_file_exists "${CLAUDE_TEST_PERSIST_DIR}/validate_pending" "validate_pending set" \
+    && assert_file_contains "${CLAUDE_TEST_PERSIST_DIR}/validate_pending_hash" "hash-123" \
     && pass
 teardown
 
-# 11.10 No dirty flag → validation still records markers (no error)
-begin_test "11.10 No dirty → unit test still sets validated_unit"
+# 11.11 No dirty flag → validation still records markers (no error)
+begin_test "11.11 No dirty → unit test still sets validated_unit"
 setup
 # No dirty flag set — should still record the tier marker without error
 run_hook "$TRACK_VAL" "$(json_bash_pretooluse "npm test")"
@@ -1131,8 +1182,8 @@ assert_file_exists "${CLAUDE_TEST_PERSIST_DIR}/validated_unit" "validated_unit s
     && pass
 teardown
 
-# 11.11 E2E before unit also works (order doesn't matter)
-begin_test "11.11 E2E first, then unit → dirty cleared"
+# 11.12 E2E before unit also works (order doesn't matter)
+begin_test "11.12 E2E first, then unit → dirty cleared"
 setup
 echo "order test" > "${CLAUDE_TEST_PERSIST_DIR}/dirty"
 run_hook "$TRACK_VAL" "$(json_bash_pretooluse "npx playwright test")"
@@ -1143,23 +1194,25 @@ if assert_file_exists "${CLAUDE_TEST_PERSIST_DIR}/dirty" "dirty after e2e only";
 fi
 teardown
 
-# 11.12 clear_approval.sh and accept_outcome.sh clean up tier markers
-begin_test "11.12 clear_approval.sh cleans up tier markers"
+# 11.13 clear_approval.sh and accept_outcome.sh clean up tier markers
+begin_test "11.13 clear_approval.sh cleans up tier markers"
 setup
 echo "npm test" > "${CLAUDE_TEST_PERSIST_DIR}/validated_unit"
 echo "npx cypress run" > "${CLAUDE_TEST_PERSIST_DIR}/validated_e2e"
 echo "1" > "${CLAUDE_TEST_PERSIST_DIR}/approved"
+echo "0" > "${CLAUDE_TEST_PERSIST_DIR}/objective_verification_required"
 run_hook "${SCRIPTS_DIR}/clear_approval.sh" ""
 assert_file_missing "${CLAUDE_TEST_PERSIST_DIR}/validated_unit" "validated_unit cleaned" \
     && assert_file_missing "${CLAUDE_TEST_PERSIST_DIR}/validated_e2e" "validated_e2e cleaned" \
     && pass
 teardown
 
-begin_test "11.13 accept_outcome.sh cleans up tier markers"
+begin_test "11.14 accept_outcome.sh cleans up tier markers"
 setup
 echo "npm test" > "${CLAUDE_TEST_PERSIST_DIR}/validated_unit"
 echo "npx cypress run" > "${CLAUDE_TEST_PERSIST_DIR}/validated_e2e"
 echo "1" > "${CLAUDE_TEST_PERSIST_DIR}/approved"
+echo "0" > "${CLAUDE_TEST_PERSIST_DIR}/objective_verification_required"
 run_hook "${SCRIPTS_DIR}/accept_outcome.sh" ""
 assert_file_missing "${CLAUDE_TEST_PERSIST_DIR}/validated_unit" "validated_unit cleaned" \
     && assert_file_missing "${CLAUDE_TEST_PERSIST_DIR}/validated_e2e" "validated_e2e cleaned" \
@@ -1177,27 +1230,16 @@ TRACK_FAIL="${SCRIPTS_DIR}/track_test_failure.sh"
 # 12.1 Production file edit blocked when tests_failed absent
 begin_test "12.1 Production edit blocked without tests_failed"
 setup
-echo "1" > "${CLAUDE_TEST_PERSIST_DIR}/approved"
-echo "/src/app.ts" > "${CLAUDE_TEST_PERSIST_DIR}/scope"
-echo "abc123" > "${CLAUDE_TEST_PERSIST_DIR}/plan_hash"
-# Create a minimal plan file for hash validation
 TEMP_PLAN_12="${TEST_TMPDIR}/plan.md"
-cat > "$TEMP_PLAN_12" <<'PLAN'
-## Objective
-Test TDD enforcement for production files
-## Scope
-- /src/app.ts
-## Success Criteria
-Production edits blocked without red tests
-## Justification
-Testing TDD gate
-## Validation
-Testing
-PLAN
-echo "$TEMP_PLAN_12" > "${CLAUDE_TEST_PERSIST_DIR}/plan_file"
-# Compute real hash
-REAL_HASH=$(shasum -a 256 "$TEMP_PLAN_12" | awk '{print $1}')
-echo "$REAL_HASH" > "${CLAUDE_TEST_PERSIST_DIR}/plan_hash"
+write_plan \
+    "$TEMP_PLAN_12" \
+    "Implements SEP-201 by testing that production edits are blocked before the red phase." \
+    "- /src/app.ts" \
+    "Production edits are blocked until a failing test proves the new behavior is missing." \
+    "Per /Users/shingi/.claude/CLAUDE.md, production edits must stay behind the red-phase TDD gate." \
+    "I read the current approval and TDD gate scripts and verified this code-change plan needs both approval metadata and objective verification text." \
+    "Run pytest against the real implementation path and confirm the objective works after the code change."
+seed_approval_bundle_from_plan "$TEMP_PLAN_12"
 # No tests_failed marker
 run_hook "$REQUIRE" "$(json_pretooluse Edit /src/app.ts)"
 assert_json_field '.hookSpecificOutput.permissionDecision' 'deny' \
@@ -1208,26 +1250,18 @@ teardown
 # 12.2 Test file edit always allowed (even without tests_failed)
 begin_test "12.2 Test file edit allowed without tests_failed"
 setup
-echo "1" > "${CLAUDE_TEST_PERSIST_DIR}/approved"
-echo "/src/test_app.py" > "${CLAUDE_TEST_PERSIST_DIR}/scope"
 TEMP_PLAN_12="${TEST_TMPDIR}/plan.md"
-cat > "$TEMP_PLAN_12" <<'PLAN'
-## Objective
-Test TDD enforcement allows test files
-## Scope
-- /src/test_app.py
-## Success Criteria
-Test files pass through TDD gate
-## Justification
-Testing TDD gate
-## Validation
-Testing
-PLAN
-echo "$TEMP_PLAN_12" > "${CLAUDE_TEST_PERSIST_DIR}/plan_file"
-REAL_HASH=$(shasum -a 256 "$TEMP_PLAN_12" | awk '{print $1}')
-echo "$REAL_HASH" > "${CLAUDE_TEST_PERSIST_DIR}/plan_hash"
+write_plan \
+    "$TEMP_PLAN_12" \
+    "Implements SEP-202 by confirming test files stay editable before the red phase." \
+    "- /src/test_app.py" \
+    "Test files pass through the approval gate without requiring a prior failing test." \
+    "Per /Users/shingi/.claude/CLAUDE.md, test files are always editable during the red phase." \
+    "I read the current approval and TDD scripts and verified test-file patterns bypass the production-file TDD gate." \
+    "Run pytest against the real implementation path and confirm the objective works after the code change."
+seed_approval_bundle_from_plan "$TEMP_PLAN_12"
 run_hook "$REQUIRE" "$(json_pretooluse Edit /src/test_app.py)"
-assert_output_not_contains "TDD ENFORCEMENT" && pass
+assert_json_field '.hookSpecificOutput.permissionDecision' 'allow' && pass
 teardown
 
 # 12.3 track_test_failure.sh sets tests_failed on failing test command
@@ -1249,81 +1283,56 @@ teardown
 # 12.5 After tests_failed set, production file edit allowed
 begin_test "12.5 Production edit allowed after tests_failed"
 setup
-echo "1" > "${CLAUDE_TEST_PERSIST_DIR}/approved"
-echo "/src/app.ts" > "${CLAUDE_TEST_PERSIST_DIR}/scope"
 TEMP_PLAN_12="${TEST_TMPDIR}/plan.md"
-cat > "$TEMP_PLAN_12" <<'PLAN'
-## Objective
-Test TDD enforcement passes after red phase
-## Scope
-- /src/app.ts
-## Success Criteria
-Production edits allowed after tests fail
-## Justification
-Testing TDD gate
-## Validation
-Testing
-PLAN
-echo "$TEMP_PLAN_12" > "${CLAUDE_TEST_PERSIST_DIR}/plan_file"
-REAL_HASH=$(shasum -a 256 "$TEMP_PLAN_12" | awk '{print $1}')
-echo "$REAL_HASH" > "${CLAUDE_TEST_PERSIST_DIR}/plan_hash"
-echo "2026-01-01T00:00:00Z npm test" > "${CLAUDE_TEST_PERSIST_DIR}/tests_failed"
+write_plan \
+    "$TEMP_PLAN_12" \
+    "Implements SEP-203 by allowing production edits after the red phase and test review." \
+    "- /src/app.ts" \
+    "Production edits are allowed only after the failing test and user review markers exist." \
+    "Per /Users/shingi/.claude/CLAUDE.md, the red phase and the human test-review gate must both complete before production edits." \
+    "I read the current approval and TDD gate scripts and verified both tests_failed and tests_reviewed are required before production edits pass." \
+    "Run pytest against the real implementation path and confirm the objective works after the code change."
+seed_approval_bundle_from_plan "$TEMP_PLAN_12"
+mark_tdd_ready
 run_hook "$REQUIRE" "$(json_pretooluse Edit /src/app.ts)"
-assert_output_not_contains "TDD ENFORCEMENT" && pass
+assert_json_field '.hookSpecificOutput.permissionDecision' 'allow' && pass
 teardown
 
 # 12.6 Documentation files bypass TDD gate
 begin_test "12.6 Markdown files bypass TDD gate"
 setup
-echo "1" > "${CLAUDE_TEST_PERSIST_DIR}/approved"
-echo "/docs/README.md" > "${CLAUDE_TEST_PERSIST_DIR}/scope"
 TEMP_PLAN_12="${TEST_TMPDIR}/plan.md"
-cat > "$TEMP_PLAN_12" <<'PLAN'
-## Objective
-Test TDD enforcement exempts docs
-## Scope
-- /docs/README.md
-## Success Criteria
-Doc edits bypass TDD gate
-## Justification
-Testing TDD gate
-## Validation
-Testing
-PLAN
-echo "$TEMP_PLAN_12" > "${CLAUDE_TEST_PERSIST_DIR}/plan_file"
-REAL_HASH=$(shasum -a 256 "$TEMP_PLAN_12" | awk '{print $1}')
-echo "$REAL_HASH" > "${CLAUDE_TEST_PERSIST_DIR}/plan_hash"
+write_plan \
+    "$TEMP_PLAN_12" \
+    "Implements SEP-204 by proving documentation files bypass the production-file TDD gate." \
+    "- /docs/README.md" \
+    "Documentation edits bypass the red-phase production gate and remain scoped by approval." \
+    "Per /Users/shingi/.claude/CLAUDE.md, markdown files are exempt from the production-file TDD sequencing rules." \
+    "I read the current approval and TDD scripts and verified markdown files bypass the production-file gate while still requiring approval scope." \
+    "Review the resulting documentation in the real workspace and confirm the approved objective is met."
+seed_approval_bundle_from_plan "$TEMP_PLAN_12"
 # No tests_failed marker
 run_hook "$REQUIRE" "$(json_pretooluse Edit /docs/README.md)"
-assert_output_not_contains "TDD ENFORCEMENT" && pass
+assert_json_field '.hookSpecificOutput.permissionDecision' 'allow' && pass
 teardown
 
 # 12.7 Full red-green sequence: write test → run (fail) → edit prod → run (pass) → validated
 begin_test "12.7 Full red-green-validate sequence"
 setup
-echo "1" > "${CLAUDE_TEST_PERSIST_DIR}/approved"
-echo -e "/src/test_app.py\n/src/app.py" > "${CLAUDE_TEST_PERSIST_DIR}/scope"
 TEMP_PLAN_12="${TEST_TMPDIR}/plan.md"
-cat > "$TEMP_PLAN_12" <<'PLAN'
-## Objective
-Test full TDD red-green cycle end to end
-## Scope
-- /src/test_app.py
-- /src/app.py
-## Success Criteria
-Full cycle works correctly
-## Justification
-Testing TDD gate
-## Validation
-Testing
-PLAN
-echo "$TEMP_PLAN_12" > "${CLAUDE_TEST_PERSIST_DIR}/plan_file"
-REAL_HASH=$(shasum -a 256 "$TEMP_PLAN_12" | awk '{print $1}')
-echo "$REAL_HASH" > "${CLAUDE_TEST_PERSIST_DIR}/plan_hash"
+write_plan \
+    "$TEMP_PLAN_12" \
+    "Implements SEP-205 by exercising the current red phase, review gate, and production edit workflow end to end." \
+    $'- /src/test_app.py\n- /src/app.py' \
+    "The full TDD workflow enforces red phase, human test review, and then production editing." \
+    "Per /Users/shingi/.claude/CLAUDE.md, the TDD workflow includes both the red phase and the user review checkpoint before production edits." \
+    "I read the current approval, failure-tracking, and TDD gate scripts and verified the workflow requires test editing, a failing test, user review, and then production edits." \
+    "Run pytest against the real implementation path and confirm the objective works after the code change."
+seed_approval_bundle_from_plan "$TEMP_PLAN_12"
 # Step 1: Test file edit allowed (no tests_failed needed)
 run_hook "$REQUIRE" "$(json_pretooluse Edit /src/test_app.py)"
 STEP1_OK=false
-echo "$HOOK_OUTPUT" | grep -q "TDD ENFORCEMENT" || STEP1_OK=true
+[[ "$(echo "$HOOK_OUTPUT" | jq -r '.hookSpecificOutput.permissionDecision')" == "allow" ]] && STEP1_OK=true
 # Step 2: Production file blocked (no tests_failed yet)
 run_hook "$REQUIRE" "$(json_pretooluse Edit /src/app.py)"
 STEP2_OK=false
@@ -1332,10 +1341,12 @@ echo "$HOOK_OUTPUT" | grep -q "TDD ENFORCEMENT" && STEP2_OK=true
 run_hook "$TRACK_FAIL" "$(json_bash_pretooluse "pytest")"
 STEP3_OK=false
 [[ -f "${CLAUDE_TEST_PERSIST_DIR}/tests_failed" ]] && STEP3_OK=true
-# Step 4: Production file now allowed
+# Step 4: User reviews the red-phase tests
+echo "1" > "${CLAUDE_TEST_PERSIST_DIR}/tests_reviewed"
+# Step 5: Production file now allowed
 run_hook "$REQUIRE" "$(json_pretooluse Edit /src/app.py)"
 STEP4_OK=false
-echo "$HOOK_OUTPUT" | grep -q "TDD ENFORCEMENT" || STEP4_OK=true
+[[ "$(echo "$HOOK_OUTPUT" | jq -r '.hookSpecificOutput.permissionDecision')" == "allow" ]] && STEP4_OK=true
 if $STEP1_OK && $STEP2_OK && $STEP3_OK && $STEP4_OK; then
     pass
 else
@@ -1346,25 +1357,16 @@ teardown
 # 12.8 Fake test sequence blocked: write test → run (pass immediately) → prod edit blocked
 begin_test "12.8 Fake test (passes immediately) does NOT unlock prod edit"
 setup
-echo "1" > "${CLAUDE_TEST_PERSIST_DIR}/approved"
-echo -e "/src/test_app.py\n/src/app.py" > "${CLAUDE_TEST_PERSIST_DIR}/scope"
 TEMP_PLAN_12="${TEST_TMPDIR}/plan.md"
-cat > "$TEMP_PLAN_12" <<'PLAN'
-## Objective
-Test that fake tests do not unlock production
-## Scope
-- /src/test_app.py
-- /src/app.py
-## Success Criteria
-Fake tests blocked
-## Justification
-Testing TDD gate
-## Validation
-Testing
-PLAN
-echo "$TEMP_PLAN_12" > "${CLAUDE_TEST_PERSIST_DIR}/plan_file"
-REAL_HASH=$(shasum -a 256 "$TEMP_PLAN_12" | awk '{print $1}')
-echo "$REAL_HASH" > "${CLAUDE_TEST_PERSIST_DIR}/plan_hash"
+write_plan \
+    "$TEMP_PLAN_12" \
+    "Implements SEP-206 by proving passing tests alone do not unlock production editing." \
+    $'- /src/test_app.py\n- /src/app.py' \
+    "A passing test without a prior failure leaves production editing blocked by the red-phase gate." \
+    "Per /Users/shingi/.claude/CLAUDE.md, tests that pass immediately do not unlock production editing." \
+    "I read the current validation and TDD scripts and verified only PostToolUseFailure sets tests_failed for the red phase." \
+    "Run pytest against the real implementation path and confirm the objective works after the code change."
+seed_approval_bundle_from_plan "$TEMP_PLAN_12"
 # Test passes (PostToolUse, not PostToolUseFailure) — track_validation runs, NOT track_test_failure
 TRACK_VAL_12="${SCRIPTS_DIR}/track_validation.sh"
 run_hook "$TRACK_VAL_12" "$(json_bash_pretooluse "pytest")"
@@ -1403,30 +1405,20 @@ teardown
 # 12.11 Test file patterns: _test.go, .spec.ts, __tests__/ dir
 begin_test "12.11 Various test file patterns bypass TDD gate"
 setup
-echo "1" > "${CLAUDE_TEST_PERSIST_DIR}/approved"
-echo -e "/src/app_test.go\n/src/app.spec.ts\n/src/__tests__/app.js" > "${CLAUDE_TEST_PERSIST_DIR}/scope"
 TEMP_PLAN_12="${TEST_TMPDIR}/plan.md"
-cat > "$TEMP_PLAN_12" <<'PLAN'
-## Objective
-Test various test file pattern recognition
-## Scope
-- /src/app_test.go
-- /src/app.spec.ts
-- /src/__tests__/app.js
-## Success Criteria
-All test patterns recognized
-## Justification
-Testing TDD gate
-## Validation
-Testing
-PLAN
-echo "$TEMP_PLAN_12" > "${CLAUDE_TEST_PERSIST_DIR}/plan_file"
-REAL_HASH=$(shasum -a 256 "$TEMP_PLAN_12" | awk '{print $1}')
-echo "$REAL_HASH" > "${CLAUDE_TEST_PERSIST_DIR}/plan_hash"
+write_plan \
+    "$TEMP_PLAN_12" \
+    "Implements SEP-207 by checking that the current test-file patterns bypass the production-file gate." \
+    $'- /src/app_test.go\n- /src/app.spec.ts\n- /src/__tests__/app.js' \
+    "All recognized test-file patterns remain editable during the red phase." \
+    "Per /Users/shingi/.claude/CLAUDE.md, recognized test-file patterns bypass the production-file TDD gate." \
+    "I read the current require_plan_approval.sh matcher list and verified these test-file patterns should all pass the TDD gate." \
+    "Run the relevant test command against the real implementation path and confirm the approved objective is met."
+seed_approval_bundle_from_plan "$TEMP_PLAN_12"
 ALL_PASS=true
 for TEST_PATH in "/src/app_test.go" "/src/app.spec.ts" "/src/__tests__/app.js"; do
     run_hook "$REQUIRE" "$(json_pretooluse Edit "$TEST_PATH")"
-    if echo "$HOOK_OUTPUT" | grep -q "TDD ENFORCEMENT"; then
+    if [[ "$(echo "$HOOK_OUTPUT" | jq -r '.hookSpecificOutput.permissionDecision')" != "allow" ]]; then
         ALL_PASS=false
         fail "TDD gate blocked test file: $TEST_PATH"
         break
@@ -1458,14 +1450,16 @@ assert_file_missing "${CLAUDE_TEST_PERSIST_DIR}/tests_failed" "tests_failed clea
     && pass
 teardown
 
-# 12.14 record_validation.sh --force also sets tests_failed (refactor escape hatch)
-begin_test "12.14 record_validation.sh --force sets tests_failed"
+# 12.14 record_validation.sh --force is blocked
+begin_test "12.14 record_validation.sh --force is blocked"
 setup
 echo "refactor" > "${CLAUDE_TEST_PERSIST_DIR}/dirty"
 HOOK_OUTPUT=""
 HOOK_EXIT=0
 HOOK_OUTPUT=$(bash "${SCRIPTS_DIR}/record_validation.sh" --force "refactor: no new behavior" 2>&1) || HOOK_EXIT=$?
-assert_file_exists "${CLAUDE_TEST_PERSIST_DIR}/tests_failed" "tests_failed set by --force" \
+assert_exit_code 1 \
+    && assert_output_contains "not permitted" \
+    && assert_file_exists "${CLAUDE_TEST_PERSIST_DIR}/dirty" "dirty still present" \
     && pass
 teardown
 
@@ -1483,6 +1477,7 @@ begin_test "12.16 clear_approval.sh clears tests_failed"
 setup
 echo "old red" > "${CLAUDE_TEST_PERSIST_DIR}/tests_failed"
 echo "1" > "${CLAUDE_TEST_PERSIST_DIR}/approved"
+echo "0" > "${CLAUDE_TEST_PERSIST_DIR}/objective_verification_required"
 # No dirty flag so clear_approval.sh won't block
 HOOK_OUTPUT=""
 HOOK_EXIT=0
@@ -1496,6 +1491,7 @@ begin_test "12.17 accept_outcome.sh clears tests_failed"
 setup
 echo "old red" > "${CLAUDE_TEST_PERSIST_DIR}/tests_failed"
 echo "1" > "${CLAUDE_TEST_PERSIST_DIR}/approved"
+echo "0" > "${CLAUDE_TEST_PERSIST_DIR}/objective_verification_required"
 HOOK_OUTPUT=""
 HOOK_EXIT=0
 HOOK_OUTPUT=$(bash "${SCRIPTS_DIR}/accept_outcome.sh" 2>&1) || HOOK_EXIT=$?
@@ -1513,6 +1509,224 @@ HOOK_EXIT=0
 HOOK_OUTPUT=$(bash "${SCRIPTS_DIR}/reject_outcome.sh" 2>&1) || HOOK_EXIT=$?
 assert_file_missing "${CLAUDE_TEST_PERSIST_DIR}/tests_failed" "tests_failed cleared" \
     && pass
+teardown
+
+# 12.19 validate_plan_quality requires Objective Verification for code changes
+begin_test "12.19 validate_plan_quality blocks missing Objective Verification"
+setup
+PLAN_FILE="${HOME}/.claude/plans/_test_objective_verification_required.md"
+mkdir -p "${HOME}/.claude/plans"
+cat > "$PLAN_FILE" <<'PLAN'
+## Objective
+Validate that code-change plans require objective verification.
+
+## Scope
+- /src/app.py
+
+## Success Criteria
+Plan is rejected without objective verification.
+
+## Justification
+Testing the objective verification gate against plan approval.
+
+## Validation
+Local hook test only.
+PLAN
+echo "$(date +%s)" > "${CLAUDE_TEST_PERSIST_DIR}/planning_started_at"
+run_hook "${SCRIPTS_DIR}/validate_plan_quality.sh" "$(json_pretooluse ExitPlanMode)"
+assert_json_field '.hookSpecificOutput.permissionDecision' 'deny' \
+    && assert_output_contains "Objective Verification" \
+    && pass
+rm -f "$PLAN_FILE"
+teardown
+
+# 12.20 clear_approval.sh blocks when objective proof is missing
+begin_test "12.20 clear_approval.sh blocks without objective proof"
+setup
+echo "1" > "${CLAUDE_TEST_PERSIST_DIR}/approved"
+echo "hash-789" > "${CLAUDE_TEST_PERSIST_DIR}/plan_hash"
+echo "1" > "${CLAUDE_TEST_PERSIST_DIR}/objective_verification_required"
+cat > "${CLAUDE_TEST_PERSIST_DIR}/objective_verification" <<'EOF'
+Run `python verify_real_system.py` and confirm the objective works.
+EOF
+HOOK_OUTPUT=""
+HOOK_EXIT=0
+HOOK_OUTPUT=$(bash "${SCRIPTS_DIR}/clear_approval.sh" 2>&1) || HOOK_EXIT=$?
+assert_exit_code 1 \
+    && assert_output_contains "not been verified" \
+    && pass
+teardown
+
+# 12.21 accept_outcome preflight requires second user confirmation for bypass
+begin_test "12.21 accept_outcome preflight uses two-step user bypass"
+setup
+echo "1" > "${CLAUDE_TEST_PERSIST_DIR}/approved"
+echo "hash-999" > "${CLAUDE_TEST_PERSIST_DIR}/plan_hash"
+echo "1" > "${CLAUDE_TEST_PERSIST_DIR}/objective_verification_required"
+cat > "${CLAUDE_TEST_PERSIST_DIR}/objective_verification" <<'EOF'
+Run `python verify_real_system.py` and confirm the objective works.
+EOF
+HOOK_OUTPUT=""
+HOOK_EXIT=0
+HOOK_OUTPUT=$(bash "${SCRIPTS_DIR}/accept_outcome.sh" --preflight 2>&1) || HOOK_EXIT=$?
+STEP1_OK=false
+if [[ "$HOOK_EXIT" -eq 1 ]] && [[ -f "${CLAUDE_TEST_PERSIST_DIR}/accept_bypass_pending" ]]; then
+    STEP1_OK=true
+fi
+HOOK_OUTPUT=""
+HOOK_EXIT=0
+HOOK_OUTPUT=$(bash "${SCRIPTS_DIR}/accept_outcome.sh" --preflight 2>&1) || HOOK_EXIT=$?
+STEP2_OK=false
+if [[ "$HOOK_EXIT" -eq 0 ]] && [[ -f "${CLAUDE_TEST_PERSIST_DIR}/user_bypass" ]]; then
+    STEP2_OK=true
+fi
+if $STEP1_OK && $STEP2_OK; then
+    pass
+else
+    fail "preflight steps failed: first=$STEP1_OK second=$STEP2_OK"
+fi
+teardown
+
+# ══════════════════════════════════════════════════════════════════
+# Section 14: Workflow state injection via UserPromptSubmit (SEP-006)
+# ══════════════════════════════════════════════════════════════════
+echo ""
+echo "═══ Section 14: Workflow State Injection (SEP-006) ═══"
+
+CHECK_CMD_14="${SCRIPTS_DIR}/check_clear_approval_command.sh"
+NORMAL_PROMPT='{"session_id":"test-session-001","prompt":"continue implementing"}'
+
+# 14.1 Workflow state injected when plan is approved
+begin_test "14.1 Workflow state injected when plan is approved"
+setup
+echo "1" > "${CLAUDE_TEST_PERSIST_DIR}/approved"
+echo "Build the widget" > "${CLAUDE_TEST_PERSIST_DIR}/objective"
+echo "/src/widget.py" > "${CLAUDE_TEST_PERSIST_DIR}/scope"
+echo "Widget works end to end" > "${CLAUDE_TEST_PERSIST_DIR}/criteria"
+run_hook "$CHECK_CMD_14" "$NORMAL_PROMPT"
+CONTEXT=$(echo "$HOOK_OUTPUT" | jq -r '.hookSpecificOutput.additionalContext // empty')
+if echo "$CONTEXT" | grep -q "WORKFLOW STATE" && \
+   echo "$CONTEXT" | grep -q "APPROVED" && \
+   echo "$CONTEXT" | grep -q "Build the widget"; then
+    pass
+else
+    fail "Expected WORKFLOW STATE with APPROVED and objective (got: ${CONTEXT:0:300})"
+fi
+teardown
+
+# 14.2 Workflow state shows TDD phase: tests written, not yet reviewed
+begin_test "14.2 Workflow state shows TDD red phase"
+setup
+echo "1" > "${CLAUDE_TEST_PERSIST_DIR}/approved"
+echo "Build the widget" > "${CLAUDE_TEST_PERSIST_DIR}/objective"
+echo "/src/widget.py" > "${CLAUDE_TEST_PERSIST_DIR}/scope"
+echo "Widget works" > "${CLAUDE_TEST_PERSIST_DIR}/criteria"
+echo "failed at $(date)" > "${CLAUDE_TEST_PERSIST_DIR}/tests_failed"
+run_hook "$CHECK_CMD_14" "$NORMAL_PROMPT"
+CONTEXT=$(echo "$HOOK_OUTPUT" | jq -r '.hookSpecificOutput.additionalContext // empty')
+if echo "$CONTEXT" | grep -qi "tests.*fail\|red phase\|tests written"; then
+    pass
+else
+    fail "Expected TDD red phase indicator (got: ${CONTEXT:0:300})"
+fi
+teardown
+
+# 14.3 Workflow state shows tests reviewed / ready to implement
+begin_test "14.3 Workflow state shows tests reviewed"
+setup
+echo "1" > "${CLAUDE_TEST_PERSIST_DIR}/approved"
+echo "Build the widget" > "${CLAUDE_TEST_PERSIST_DIR}/objective"
+echo "/src/widget.py" > "${CLAUDE_TEST_PERSIST_DIR}/scope"
+echo "Widget works" > "${CLAUDE_TEST_PERSIST_DIR}/criteria"
+echo "failed" > "${CLAUDE_TEST_PERSIST_DIR}/tests_failed"
+echo "approved" > "${CLAUDE_TEST_PERSIST_DIR}/tests_reviewed"
+run_hook "$CHECK_CMD_14" "$NORMAL_PROMPT"
+CONTEXT=$(echo "$HOOK_OUTPUT" | jq -r '.hookSpecificOutput.additionalContext // empty')
+if echo "$CONTEXT" | grep -qi "tests reviewed\|ready to implement\|IMPLEMENTING"; then
+    pass
+else
+    fail "Expected tests-reviewed / implementing indicator (got: ${CONTEXT:0:300})"
+fi
+teardown
+
+# 14.4 Workflow state shows edit count when edits have been made
+begin_test "14.4 Workflow state shows edit count"
+setup
+echo "1" > "${CLAUDE_TEST_PERSIST_DIR}/approved"
+echo "Build the widget" > "${CLAUDE_TEST_PERSIST_DIR}/objective"
+echo "/src/widget.py" > "${CLAUDE_TEST_PERSIST_DIR}/scope"
+echo "Widget works" > "${CLAUDE_TEST_PERSIST_DIR}/criteria"
+echo "5" > "${CLAUDE_TEST_PERSIST_DIR}/edit_count"
+echo "failed" > "${CLAUDE_TEST_PERSIST_DIR}/tests_failed"
+echo "approved" > "${CLAUDE_TEST_PERSIST_DIR}/tests_reviewed"
+run_hook "$CHECK_CMD_14" "$NORMAL_PROMPT"
+CONTEXT=$(echo "$HOOK_OUTPUT" | jq -r '.hookSpecificOutput.additionalContext // empty')
+if echo "$CONTEXT" | grep -q "5"; then
+    pass
+else
+    fail "Expected edit count 5 in state (got: ${CONTEXT:0:300})"
+fi
+teardown
+
+# 14.5 Workflow state shows planning phase when in plan mode
+begin_test "14.5 Workflow state shows planning phase"
+setup
+echo "1" > "${CLAUDE_TEST_PERSIST_DIR}/planning"
+run_hook "$CHECK_CMD_14" "$NORMAL_PROMPT"
+CONTEXT=$(echo "$HOOK_OUTPUT" | jq -r '.hookSpecificOutput.additionalContext // empty')
+if echo "$CONTEXT" | grep -qi "PLANNING\|plan mode"; then
+    pass
+else
+    fail "Expected PLANNING indicator (got: ${CONTEXT:0:300})"
+fi
+teardown
+
+# 14.6 Workflow state includes plan file path
+begin_test "14.6 Workflow state includes plan file path"
+setup
+echo "1" > "${CLAUDE_TEST_PERSIST_DIR}/approved"
+echo "Build the widget" > "${CLAUDE_TEST_PERSIST_DIR}/objective"
+echo "/src/widget.py" > "${CLAUDE_TEST_PERSIST_DIR}/scope"
+echo "Widget works" > "${CLAUDE_TEST_PERSIST_DIR}/criteria"
+echo "/tmp/test-plan.md" > "${CLAUDE_TEST_PERSIST_DIR}/plan_file"
+run_hook "$CHECK_CMD_14" "$NORMAL_PROMPT"
+CONTEXT=$(echo "$HOOK_OUTPUT" | jq -r '.hookSpecificOutput.additionalContext // empty')
+if echo "$CONTEXT" | grep -q "/tmp/test-plan.md"; then
+    pass
+else
+    fail "Expected plan file path in state (got: ${CONTEXT:0:300})"
+fi
+teardown
+
+# 14.7 No workflow state block when no plan and no planning
+begin_test "14.7 No workflow state when idle (no plan, no planning)"
+setup
+run_hook "$CHECK_CMD_14" "$NORMAL_PROMPT"
+CONTEXT=$(echo "$HOOK_OUTPUT" | jq -r '.hookSpecificOutput.additionalContext // empty')
+if echo "$CONTEXT" | grep -q "WORKFLOW STATE"; then
+    fail "Should not inject WORKFLOW STATE when idle (got: ${CONTEXT:0:300})"
+else
+    pass
+fi
+teardown
+
+# 14.8 Workflow state shows dirty flag
+begin_test "14.8 Workflow state shows dirty flag"
+setup
+echo "1" > "${CLAUDE_TEST_PERSIST_DIR}/approved"
+echo "Build the widget" > "${CLAUDE_TEST_PERSIST_DIR}/objective"
+echo "/src/widget.py" > "${CLAUDE_TEST_PERSIST_DIR}/scope"
+echo "Widget works" > "${CLAUDE_TEST_PERSIST_DIR}/criteria"
+echo "1" > "${CLAUDE_TEST_PERSIST_DIR}/dirty"
+echo "failed" > "${CLAUDE_TEST_PERSIST_DIR}/tests_failed"
+echo "approved" > "${CLAUDE_TEST_PERSIST_DIR}/tests_reviewed"
+run_hook "$CHECK_CMD_14" "$NORMAL_PROMPT"
+CONTEXT=$(echo "$HOOK_OUTPUT" | jq -r '.hookSpecificOutput.additionalContext // empty')
+if echo "$CONTEXT" | grep -qi "dirty\|validation needed\|unvalidated"; then
+    pass
+else
+    fail "Expected dirty/validation-needed indicator (got: ${CONTEXT:0:300})"
+fi
 teardown
 
 # ══════════════════════════════════════════════════════════════════

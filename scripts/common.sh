@@ -32,7 +32,7 @@ init_hook() {
 state_file() { echo "${PERSIST_DIR}/$1"; }
 state_exists() { [[ -f "${PERSIST_DIR}/$1" ]]; }
 state_write() { echo "$2" > "${PERSIST_DIR}/$1"; }
-state_read() { cat "${PERSIST_DIR}/$1" 2>/dev/null; }
+state_read() { cat "${PERSIST_DIR}/$1" 2>/dev/null || true; }
 state_remove() { rm -f "${PERSIST_DIR}/$1"; }
 counter_increment() {
     local key="$1"
@@ -50,7 +50,7 @@ counter_increment() {
 persist_file() { echo "${PERSIST_DIR}/$1"; }
 persist_exists() { [[ -f "${PERSIST_DIR}/$1" ]]; }
 persist_write() { echo "$2" > "${PERSIST_DIR}/$1"; }
-persist_read() { cat "${PERSIST_DIR}/$1" 2>/dev/null; }
+persist_read() { cat "${PERSIST_DIR}/$1" 2>/dev/null || true; }
 persist_remove() { rm -f "${PERSIST_DIR}/$1"; }
 
 # ── JSON field extraction ──
@@ -165,7 +165,16 @@ resolve_plan_file() {
 resolve_plan_file_for_manual_approve() {
     local plan_file planning_started
 
-    # Prefer a plan created during the current planning window when available.
+    # 1) Check existing plan_file state marker first (set by previous approval).
+    # When /approve is called in a new conversation, this marker points to the
+    # correct plan from the previous session — don't override with mtime guess.
+    plan_file=$(normalize_plan_path "$(state_read plan_file)")
+    if [[ -n "$plan_file" && -f "$plan_file" ]] && ! plan_is_done "$plan_file"; then
+        echo "$plan_file"
+        return 0
+    fi
+
+    # 2) Prefer a plan created during the current planning window when available.
     planning_started=$(state_read planning_started_at)
     if [[ "$planning_started" =~ ^[0-9]+$ && "$planning_started" -gt 0 ]]; then
         plan_file=$(newest_plan_file "$planning_started")
@@ -242,6 +251,30 @@ extract_plan_criteria() {
         | head -3
 }
 
+extract_plan_objective_verification() {
+    local plan_file="$1"
+    sed -n '/^##[[:space:]]*[Oo]bjective[[:space:]]*[Vv]erification/,/^##/p' "$plan_file" \
+        | tail -n +2 | grep -v '^## ' \
+        | sed '/^[[:space:]]*$/d'
+}
+
+plan_requires_objective_verification() {
+    local plan_file="$1"
+    local scope_path=""
+
+    while IFS= read -r scope_path; do
+        [[ -z "$scope_path" ]] && continue
+        [[ "$scope_path" == *"/.claude/plans/"* ]] && continue
+        [[ "$scope_path" == *"/.sep/"* ]] && continue
+        [[ "$scope_path" == *"/.claude/projects/"*"/memory/"* ]] && continue
+        if [[ ! "$scope_path" =~ \.(md|mdx|txt|rst)$ ]]; then
+            return 0
+        fi
+    done <<< "$(extract_plan_scope "$plan_file")"
+
+    return 1
+}
+
 write_active_plan_marker() {
     local plan_file="$1"
     local plan_hash="$2"
@@ -258,7 +291,7 @@ EOF
 
 write_approval_bundle() {
     local plan_file="$1"
-    local plan_hash objective scope criteria
+    local plan_hash objective scope criteria objective_verification objective_verification_required
 
     [[ -z "$plan_file" || ! -f "$plan_file" ]] && return 1
 
@@ -268,6 +301,12 @@ write_approval_bundle() {
     objective=$(extract_plan_objective "$plan_file")
     scope=$(extract_plan_scope "$plan_file")
     criteria=$(extract_plan_criteria "$plan_file")
+    objective_verification=$(extract_plan_objective_verification "$plan_file")
+    if plan_requires_objective_verification "$plan_file"; then
+        objective_verification_required="1"
+    else
+        objective_verification_required="0"
+    fi
 
     # Write metadata first; set approved marker last to avoid partial state.
     state_remove approved
@@ -276,6 +315,8 @@ write_approval_bundle() {
     state_write objective "$objective"
     state_write scope "$scope"
     state_write criteria "$criteria"
+    state_write objective_verification_required "$objective_verification_required"
+    state_write objective_verification "$objective_verification"
     state_write approved "1"
     write_active_plan_marker "$plan_file" "$plan_hash" || true
 
@@ -283,7 +324,7 @@ write_approval_bundle() {
 }
 
 approval_bundle_is_complete() {
-    local plan_file expected_hash current_hash scope_content
+    local plan_file expected_hash current_hash scope_content objective_verification_required
 
     state_exists approved || return 1
     state_exists plan_file || return 1
@@ -302,7 +343,78 @@ approval_bundle_is_complete() {
     scope_content=$(state_read scope)
     [[ -n "$scope_content" ]] || return 1
 
+    objective_verification_required=$(state_read objective_verification_required)
+    [[ -n "$objective_verification_required" ]] || return 1
+    if [[ "$objective_verification_required" == "1" ]]; then
+        [[ -n "$(state_read objective_verification)" ]] || return 1
+    fi
+
     return 0
+}
+
+current_plan_hash() {
+    state_read plan_hash
+}
+
+current_edit_count() {
+    local count
+    count=$(state_read edit_count)
+    if [[ "$count" =~ ^[0-9]+$ ]]; then
+        echo "$count"
+    else
+        echo "0"
+    fi
+}
+
+objective_verification_required_for_current_plan() {
+    [[ "$(state_read objective_verification_required)" == "1" ]]
+}
+
+objective_verified_for_current_plan() {
+    local current_hash verified_hash verified_edit_count current_edit_count_value
+    current_hash=$(current_plan_hash)
+    verified_hash=$(state_read objective_verified_hash)
+    verified_edit_count=$(state_read objective_verified_edit_count)
+    current_edit_count_value=$(current_edit_count)
+
+    [[ -n "$current_hash" ]] || return 1
+    [[ -n "$verified_hash" ]] || return 1
+    state_exists objective_verified || return 1
+    [[ "$current_hash" == "$verified_hash" ]] || return 1
+    [[ "$verified_edit_count" == "$current_edit_count_value" ]]
+}
+
+validate_pending_for_current_plan() {
+    local current_hash pending_hash
+    current_hash=$(current_plan_hash)
+    pending_hash=$(state_read validate_pending_hash)
+
+    [[ -n "$current_hash" ]] || return 1
+    [[ -n "$pending_hash" ]] || return 1
+    state_exists validate_pending || return 1
+    [[ "$current_hash" == "$pending_hash" ]]
+}
+
+accept_bypass_pending_for_current_plan() {
+    local current_hash pending_hash
+    current_hash=$(current_plan_hash)
+    pending_hash=$(state_read accept_bypass_pending_hash)
+
+    [[ -n "$current_hash" ]] || return 1
+    [[ -n "$pending_hash" ]] || return 1
+    state_exists accept_bypass_pending || return 1
+    [[ "$current_hash" == "$pending_hash" ]]
+}
+
+user_bypass_for_current_plan() {
+    local current_hash bypass_hash
+    current_hash=$(current_plan_hash)
+    bypass_hash=$(state_read user_bypass_hash)
+
+    [[ -n "$current_hash" ]] || return 1
+    [[ -n "$bypass_hash" ]] || return 1
+    state_exists user_bypass || return 1
+    [[ "$current_hash" == "$bypass_hash" ]]
 }
 
 # ── Conversation token helpers (SEP-005) ──
