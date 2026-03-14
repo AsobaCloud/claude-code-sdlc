@@ -21,5 +21,8 @@ if approval_bundle_is_complete; then
     allow_with_context "Plan approved. Editing unlocked. Implement ONLY the approved changes. When done, run ~/.claude/scripts/clear_approval.sh then tell the user to /accept or /reject." "PostToolUse"
 fi
 
-state_remove approved
-allow_with_context "Plan approval metadata is incomplete. Tell the user to type /approve to force-rebuild metadata. Do NOT call ExitPlanMode again — it may cascade into quality check failures." "PostToolUse"
+# DO NOT remove approved — the PreToolUse hook (validate_plan_quality.sh) is the
+# authoritative source. If the bundle is incomplete here, the PreToolUse already
+# set the best state it could. Removing it would destroy a valid approval.
+# Log a warning so the model can tell the user to /approve if needed.
+allow_with_context "Plan approval metadata may be incomplete but was NOT removed. If edits are blocked, tell the user to type /approve to rebuild metadata." "PostToolUse"
