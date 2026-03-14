@@ -1,5 +1,7 @@
 # Rules
 
+**Architecture contract:** `~/.claude/docs/ARCHITECTURE.md` is the authoritative reference for the hook system's lifecycle, state storage, concurrency model, and failure recovery. All changes to the hook system MUST reference it.
+
 ## Epistemology
 
 ALWAYS WEIGH OBJECTIVE EVIDENCE ABOVE AND BEYOND YOUR INTERNAL KNOWLEDGE.
