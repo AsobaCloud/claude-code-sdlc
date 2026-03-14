@@ -4,10 +4,7 @@
 set -euo pipefail
 
 source "$(dirname "$0")/common.sh"
-
-PROJECT_HASH=$(pwd | shasum | cut -c1-12)
-PERSIST_DIR="${CLAUDE_TEST_PERSIST_DIR:-${HOME}/.claude/state/${PROJECT_HASH}}"
-mkdir -p "$PERSIST_DIR"
+init_persist_dir
 
 if [[ -f "${PERSIST_DIR}/dirty" ]]; then
     echo "BLOCKED: Unvalidated edits exist. Run the approved objective verification before signaling completion."
@@ -42,7 +39,6 @@ rm -f \
     "${PERSIST_DIR}/validated_e2e" \
     "${PERSIST_DIR}/tests_failed" \
     "${PERSIST_DIR}/tests_reviewed" \
-    "${PERSIST_DIR}/approval_token" \
     "${PERSIST_DIR}/objective_verified" \
     "${PERSIST_DIR}/objective_verified_hash" \
     "${PERSIST_DIR}/objective_verified_edit_count" \

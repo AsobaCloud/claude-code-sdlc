@@ -2,8 +2,8 @@
 # common.sh — shared library for all Claude hook scripts
 # Source this at the top of every hook: source "$(dirname "$0")/common.sh"
 #
-# Architecture: persist-only state keyed by project directory hash.
-# No session-scoped state — session_id changes don't matter.
+# Architecture: persist-only state keyed by project directory hash + conversation token.
+# Each conversation gets isolated state via token subdirectory.
 
 # ── Require jq ──
 if ! command -v jq &>/dev/null; then
@@ -11,8 +11,25 @@ if ! command -v jq &>/dev/null; then
     exit 1
 fi
 
+# ── init_persist_dir: compute PERSIST_DIR from project hash + conversation token ──
+# Sets: PROJECT_HASH, PERSIST_DIR
+# Can be called from standalone scripts (no HOOK_INPUT needed).
+init_persist_dir() {
+    if [[ -n "${CLAUDE_TEST_PERSIST_DIR:-}" ]]; then
+        PROJECT_HASH="test"
+        PERSIST_DIR="$CLAUDE_TEST_PERSIST_DIR"
+    else
+        PROJECT_HASH=$(pwd | shasum | cut -c1-12)
+        local conv_token
+        conv_token=$(read_conversation_token 2>/dev/null) || true
+        local token_dir="${conv_token:-no-token}"
+        PERSIST_DIR="${HOME}/.claude/state/${PROJECT_HASH}/${token_dir}"
+    fi
+    mkdir -p "$PERSIST_DIR"
+}
+
 # ── init_hook: read stdin, set up persist dir ──
-# Sets: HOOK_INPUT, PERSIST_DIR (project-scoped, pwd-hashed)
+# Sets: HOOK_INPUT, SESSION_ID, PROJECT_HASH, PERSIST_DIR
 init_hook() {
     HOOK_INPUT=$(cat)
 
@@ -22,10 +39,7 @@ init_hook() {
         exit 0
     fi
 
-    # Project-scoped persistent state — single source of truth
-    PROJECT_HASH=$(pwd | shasum | cut -c1-12)
-    PERSIST_DIR="${CLAUDE_TEST_PERSIST_DIR:-${HOME}/.claude/state/${PROJECT_HASH}}"
-    mkdir -p "$PERSIST_DIR"
+    init_persist_dir
 }
 
 # ── State helpers (all persist-backed) ──
@@ -428,9 +442,6 @@ generate_conversation_token() {
     local token mem_file mem_dir
     token=$(openssl rand -hex 8)
 
-    # Write to persistent state
-    state_write conversation_token "$token"
-
     # Write to MEMORY.md so it survives compaction
     mem_file=$(resolve_memory_md)
     mem_dir=$(dirname "$mem_file")
@@ -458,10 +469,6 @@ read_conversation_token() {
     mem_file=$(resolve_memory_md)
     [[ -f "$mem_file" ]] || return 1
     sed -n '/^## Conversation Token/,/^## /{/^`/{s/^`//;s/`$//;p;q;};}' "$mem_file"
-}
-
-read_approval_token() {
-    state_read approval_token
 }
 
 # ── Hook output: deny tool ──

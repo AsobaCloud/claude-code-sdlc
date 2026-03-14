@@ -1640,6 +1640,184 @@ fi
 teardown
 
 # ══════════════════════════════════════════════════════════════════
+# Section 15: Conversation-scoped PERSIST_DIR (SEP-007)
+# ══════════════════════════════════════════════════════════════════
+echo ""
+echo "═══ Section 15: Conversation-Scoped Isolation (SEP-007) ═══"
+
+# 15.1 init_persist_dir includes conversation token in path
+begin_test "15.1 init_persist_dir includes conversation token in path"
+setup
+PROJECT_KEY=$(pwd | tr '/' '-' | sed 's/^-//')
+MEM_DIR="${HOME}/.claude/projects/-${PROJECT_KEY}/memory"
+mkdir -p "$MEM_DIR"
+cat > "${MEM_DIR}/MEMORY.md" <<'MEMEOF'
+# Memory
+
+## Conversation Token
+`test-token-abc123`
+MEMEOF
+SAVED_PERSIST_DIR="$CLAUDE_TEST_PERSIST_DIR"
+unset CLAUDE_TEST_PERSIST_DIR
+DIR=$(
+    source "${SCRIPTS_DIR}/common.sh"
+    init_persist_dir
+    echo "$PERSIST_DIR"
+) 2>/dev/null
+export CLAUDE_TEST_PERSIST_DIR="$SAVED_PERSIST_DIR"
+if [[ "$DIR" == *"/test-token-abc123" ]]; then
+    pass
+else
+    fail "PERSIST_DIR did not include token (got: $DIR)"
+fi
+teardown
+
+# 15.2 Different tokens produce different PERSIST_DIR paths
+begin_test "15.2 Different tokens produce different PERSIST_DIR paths"
+setup
+PROJECT_KEY=$(pwd | tr '/' '-' | sed 's/^-//')
+MEM_DIR="${HOME}/.claude/projects/-${PROJECT_KEY}/memory"
+mkdir -p "$MEM_DIR"
+SAVED_PERSIST_DIR="$CLAUDE_TEST_PERSIST_DIR"
+unset CLAUDE_TEST_PERSIST_DIR
+cat > "${MEM_DIR}/MEMORY.md" <<'MEMEOF'
+# Memory
+
+## Conversation Token
+`token-aaa`
+MEMEOF
+DIR_A=$(
+    source "${SCRIPTS_DIR}/common.sh"
+    init_persist_dir
+    echo "$PERSIST_DIR"
+) 2>/dev/null
+cat > "${MEM_DIR}/MEMORY.md" <<'MEMEOF'
+# Memory
+
+## Conversation Token
+`token-bbb`
+MEMEOF
+DIR_B=$(
+    source "${SCRIPTS_DIR}/common.sh"
+    init_persist_dir
+    echo "$PERSIST_DIR"
+) 2>/dev/null
+export CLAUDE_TEST_PERSIST_DIR="$SAVED_PERSIST_DIR"
+if [[ "$DIR_A" != "$DIR_B" && "$DIR_A" == *"token-aaa" && "$DIR_B" == *"token-bbb" ]]; then
+    pass
+else
+    fail "Expected different paths: A=$DIR_A B=$DIR_B"
+fi
+teardown
+
+# 15.3 No conversation token → uses "no-token" subdirectory
+begin_test "15.3 No token falls back to no-token subdirectory"
+setup
+PROJECT_KEY=$(pwd | tr '/' '-' | sed 's/^-//')
+MEM_DIR="${HOME}/.claude/projects/-${PROJECT_KEY}/memory"
+mkdir -p "$MEM_DIR"
+cat > "${MEM_DIR}/MEMORY.md" <<'MEMEOF'
+# Memory
+MEMEOF
+SAVED_PERSIST_DIR="$CLAUDE_TEST_PERSIST_DIR"
+unset CLAUDE_TEST_PERSIST_DIR
+DIR=$(
+    source "${SCRIPTS_DIR}/common.sh"
+    init_persist_dir
+    echo "$PERSIST_DIR"
+) 2>/dev/null
+export CLAUDE_TEST_PERSIST_DIR="$SAVED_PERSIST_DIR"
+if [[ "$DIR" == *"/no-token" ]]; then
+    pass
+else
+    fail "Expected no-token subdirectory (got: $DIR)"
+fi
+teardown
+
+# 15.4 Approval in one conversation not visible in another
+begin_test "15.4 Approval isolation between conversations"
+setup
+PROJECT_KEY=$(pwd | tr '/' '-' | sed 's/^-//')
+MEM_DIR="${HOME}/.claude/projects/-${PROJECT_KEY}/memory"
+mkdir -p "$MEM_DIR"
+SAVED_PERSIST_DIR="$CLAUDE_TEST_PERSIST_DIR"
+unset CLAUDE_TEST_PERSIST_DIR
+# Approve under token A
+cat > "${MEM_DIR}/MEMORY.md" <<'MEMEOF'
+# Memory
+
+## Conversation Token
+`token-conv-a`
+MEMEOF
+(
+    source "${SCRIPTS_DIR}/common.sh"
+    init_persist_dir
+    echo "1" > "${PERSIST_DIR}/approved"
+) 2>/dev/null
+# Check under token B — should NOT see approval
+cat > "${MEM_DIR}/MEMORY.md" <<'MEMEOF'
+# Memory
+
+## Conversation Token
+`token-conv-b`
+MEMEOF
+RESULT=$(
+    source "${SCRIPTS_DIR}/common.sh"
+    init_persist_dir
+    if [[ -f "${PERSIST_DIR}/approved" ]]; then
+        echo "FOUND"
+    else
+        echo "NOT_FOUND"
+    fi
+) 2>/dev/null
+export CLAUDE_TEST_PERSIST_DIR="$SAVED_PERSIST_DIR"
+if [[ "$RESULT" == "NOT_FOUND" ]]; then
+    pass
+else
+    fail "Approval from token-conv-a was visible to token-conv-b"
+fi
+teardown
+
+# 15.5 CLAUDE_TEST_PERSIST_DIR bypasses token scoping (backward compat)
+begin_test "15.5 CLAUDE_TEST_PERSIST_DIR bypasses token scoping"
+setup
+echo "1" > "${CLAUDE_TEST_PERSIST_DIR}/approved"
+echo "test-hash" > "${CLAUDE_TEST_PERSIST_DIR}/plan_hash"
+echo "/some/scope-file.py" > "${CLAUDE_TEST_PERSIST_DIR}/scope"
+echo "1" > "${CLAUDE_TEST_PERSIST_DIR}/objective_verification_required"
+echo "Run tests" > "${CLAUDE_TEST_PERSIST_DIR}/objective_verification"
+echo "test-plan.md" > "${CLAUDE_TEST_PERSIST_DIR}/plan_file"
+touch "${HOME}/.claude/plans/test-plan.md"
+mark_tdd_ready
+run_hook "${SCRIPTS_DIR}/require_plan_approval.sh" "$(json_pretooluse Edit /some/scope-file.py)"
+if echo "$HOOK_OUTPUT" | grep -q "No approved plan"; then
+    fail "CLAUDE_TEST_PERSIST_DIR approval not found — token scoping leaked into test mode"
+else
+    pass
+fi
+teardown
+
+# 15.6 Token verification in require_plan_approval.sh is removed
+begin_test "15.6 No token verification check in require_plan_approval.sh"
+setup
+echo "1" > "${CLAUDE_TEST_PERSIST_DIR}/approved"
+echo "test-hash" > "${CLAUDE_TEST_PERSIST_DIR}/plan_hash"
+echo "/some/file.py" > "${CLAUDE_TEST_PERSIST_DIR}/scope"
+echo "1" > "${CLAUDE_TEST_PERSIST_DIR}/objective_verification_required"
+echo "Run tests" > "${CLAUDE_TEST_PERSIST_DIR}/objective_verification"
+echo "test-plan.md" > "${CLAUDE_TEST_PERSIST_DIR}/plan_file"
+touch "${HOME}/.claude/plans/test-plan.md"
+echo "old-token" > "${CLAUDE_TEST_PERSIST_DIR}/approval_token"
+mark_tdd_ready
+run_hook "${SCRIPTS_DIR}/require_plan_approval.sh" "$(json_pretooluse Edit /some/file.py)"
+if echo "$HOOK_OUTPUT" | grep -q "token mismatch\|different conversation"; then
+    fail "Token verification still present — should be removed"
+else
+    pass
+fi
+teardown
+
+# ══════════════════════════════════════════════════════════════════
 # Final report
 # ══════════════════════════════════════════════════════════════════
 printf "\n${YELLOW}══════════════════════════════════════════${NC}\n"

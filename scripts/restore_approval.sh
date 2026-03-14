@@ -4,10 +4,7 @@
 # No args needed — uses current working directory
 
 source "$(dirname "$0")/common.sh"
-
-PROJECT_HASH=$(pwd | shasum | cut -c1-12)
-PERSIST_DIR="${CLAUDE_TEST_PERSIST_DIR:-${HOME}/.claude/state/${PROJECT_HASH}}"
-mkdir -p "$PERSIST_DIR"
+init_persist_dir
 
 PLAN_FILE=$(resolve_plan_file_for_manual_approve)
 if [[ -z "$PLAN_FILE" || ! -f "$PLAN_FILE" ]]; then
@@ -26,12 +23,6 @@ fi
 
 state_remove planning
 state_remove planning_started_at
-
-# Associate current conversation token with this approval (SEP-005)
-CONV_TOKEN=$(read_conversation_token)
-if [[ -n "$CONV_TOKEN" ]]; then
-    state_write approval_token "$CONV_TOKEN"
-fi
 
 echo "Approval restored for project (hash: ${PROJECT_HASH})."
 echo "Plan: ${PLAN_FILE}"

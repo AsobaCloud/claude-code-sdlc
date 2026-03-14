@@ -14,10 +14,7 @@
 set -euo pipefail
 
 source "$(dirname "$0")/common.sh"
-
-PROJECT_HASH=$(pwd | shasum | cut -c1-12)
-PERSIST_DIR="${CLAUDE_TEST_PERSIST_DIR:-${HOME}/.claude/state/${PROJECT_HASH}}"
-mkdir -p "$PERSIST_DIR"
+init_persist_dir
 
 MODE=""
 DESCRIPTION=""

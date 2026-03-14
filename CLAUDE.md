@@ -150,8 +150,8 @@ User types `/skip-investigation` to bypass investigation mode for any question.
 
 Hooks **BLOCK Edit/Write/NotebookEdit** until plan approval.
 Hooks **BLOCK ExitPlanMode** if plan quality is insufficient.
-Approval is stored **persistently per project directory** (pwd hash). It survives
-session changes, context compaction, and new sessions — no session-scoped state exists.
+Approval is stored **per conversation** (project hash + conversation token). Each
+conversation has isolated state — approval in one conversation is not visible to another.
 
 ### The Workflow
 

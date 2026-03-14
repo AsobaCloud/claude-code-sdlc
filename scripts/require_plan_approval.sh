@@ -87,22 +87,6 @@ ${METADATA_ERRORS}
 NEXT ACTION: Tell the user to type /approve to rebuild approval metadata. Do NOT call ExitPlanMode."
 fi
 
-# ── Conversation token verification (SEP-005) ──
-APPROVAL_TOKEN=$(read_approval_token)
-if [[ -n "$APPROVAL_TOKEN" ]]; then
-    CURRENT_TOKEN=$(read_conversation_token)
-    if [[ -z "$CURRENT_TOKEN" ]]; then
-        deny_tool "BLOCKED: No conversation token found. This session has no token in MEMORY.md.
-
-NEXT ACTION: Step 1: Run /new-token. Step 2: Tell the user to type /approve."
-    fi
-    if [[ "$CURRENT_TOKEN" != "$APPROVAL_TOKEN" ]]; then
-        deny_tool "BLOCKED: Approval belongs to a different conversation (token mismatch).
-
-NEXT ACTION: Tell the user to type /approve to claim this plan for the current conversation. Do NOT call EnterPlanMode — that will delete the existing plan and all approval state."
-    fi
-fi
-
 # ── Scope enforcement ──
 IN_SCOPE=false
 while IFS= read -r SCOPE_PATH; do
