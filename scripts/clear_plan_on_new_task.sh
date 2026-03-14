@@ -15,9 +15,6 @@ state_remove plan_file
 state_remove plan_hash
 state_remove planning_started_at
 
-# Clear conversation token association
-state_remove approval_token
-
 # Clear validation state
 state_remove dirty
 state_remove validated
@@ -41,5 +38,6 @@ state_remove user_bypass_hash
 state_write planning "1"
 state_write planning_started_at "$(date +%s)"
 
-echo "Previous plan cleared. Read docs and code before writing a plan."
+PLAN_DIR=$(conversation_plan_dir)
+echo "Previous plan cleared. Write your plan to ${PLAN_DIR}/<name>.md. Read docs and code before writing a plan."
 exit 0

@@ -20,10 +20,12 @@ fi
 # ── Check approval ──
 if ! state_exists approved; then
     EXISTING_PLAN=""
-    for pf in "${HOME}/.claude/plans/"*.md; do
+    PLAN_SCAN_DIR=$(conversation_plan_dir)
+    for pf in "${PLAN_SCAN_DIR}/"*.md; do
         [[ -f "$pf" ]] && EXISTING_PLAN="$pf" && break
     done
 
+    PLAN_DIR=$(conversation_plan_dir)
     if [[ -n "$EXISTING_PLAN" ]]; then
         deny_tool "BLOCKED: No approved plan for this work.
 
@@ -35,7 +37,7 @@ NEXT ACTION: Call ExitPlanMode now. Do NOT call EnterPlanMode — that will dele
 
 No plan file exists — you must create one.
 
-NEXT ACTION: Call EnterPlanMode now. Then write a plan to ~/.claude/plans/<name>.md, then call ExitPlanMode."
+NEXT ACTION: Call EnterPlanMode now. Then write a plan to ${PLAN_DIR}/<name>.md, then call ExitPlanMode."
     fi
 fi
 

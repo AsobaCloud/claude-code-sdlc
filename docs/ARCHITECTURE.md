@@ -143,9 +143,7 @@ Computed as: `pwd | shasum | cut -c1-12`
 
 ### Storage
 
-Plan files live in `~/.claude/plans/{CONVERSATION_TOKEN}/`. Each conversation has its own plan directory.
-
-`⚠ NOT YET IMPLEMENTED`: plans currently go to shared `~/.claude/plans/`, `newest_plan_file()` scans all plans regardless of conversation.
+Plan files live in `~/.claude/plans/{CONVERSATION_TOKEN}/`. Each conversation has its own plan directory. `conversation_plan_dir()` in `common.sh` returns the correct path. `newest_plan_file()` only scans the calling conversation's plan directory.
 
 ### Resolution order
 
@@ -214,7 +212,9 @@ Completed plans may be archived or deleted. No plan file persists indefinitely.
 
 - MEMORY.md conversation token — each project directory supports one active conversation token in MEMORY.md at a time. When a new conversation generates a token, the previous token is overwritten. The previous conversation's PERSIST_DIR remains on disk but becomes unreachable via MEMORY.md.
 
-`⚠ NOT YET IMPLEMENTED`: plan files still share `~/.claude/plans/`, MEMORY.md is still the sole token store (single-slot).
+### Token resolution in `init_persist_dir()`
+
+`CONVERSATION_TOKEN` is set with priority: `SESSION_ID` (from hook JSON) > `CONVERSATION_TOKEN` env var > `read_conversation_token()` from MEMORY.md > `no-token`. Using `SESSION_ID` as the primary source eliminates the MEMORY.md single-slot collision for all hook-based flows.
 
 ### Invariants
 
@@ -299,8 +299,6 @@ Read the injected WORKFLOW STATE block — it tells you exactly where you are.
 - **Plan file isolation:** Each conversation writes plans to `~/.claude/plans/{TOKEN}/`. Plan resolution functions (`newest_plan_file()`, `resolve_plan_file()`) only scan the conversation's own subdirectory.
 - **Token storage:** Each conversation's token is stored in its own PERSIST_DIR. MEMORY.md holds the most recent token as a convenience for compaction recovery, but is NOT the authoritative token store for concurrent sessions.
 - **Invariant:** Two conversations MAY both be in active planning or editing phases simultaneously without interference. Neither conversation's hooks, state, or plan files affect the other.
-
-`⚠ NOT YET IMPLEMENTED`: plan files still share `~/.claude/plans/`, MEMORY.md is still the sole token store (single-slot), `newest_plan_file()` still scans shared directory.
 
 ---
 
@@ -402,10 +400,10 @@ Items where the code does not yet match this contract:
 
 | Contract requirement | Current state | Tracking |
 |---|---|---|
-| Plan files in `~/.claude/plans/{TOKEN}/` | All plans in shared `~/.claude/plans/` | Needs SEP |
-| `newest_plan_file()` scoped to conversation | Scans all plans globally | Needs SEP |
-| MEMORY.md not sole token store | MEMORY.md is single-slot, last-writer-wins | Needs design |
-| `approve_plan.sh` / `validate_plan_quality.sh` clean of dead `approval_token` writes | Still write it (harmless but dead code) | Cleanup |
+| Plan files in `~/.claude/plans/{TOKEN}/` | Implemented via `conversation_plan_dir()` | SEP-004 ✅ |
+| `newest_plan_file()` scoped to conversation | Scans only `conversation_plan_dir()` | SEP-004 ✅ |
+| `SESSION_ID` as primary token source | `init_persist_dir()` prefers SESSION_ID from hook JSON | SEP-004 ✅ |
+| Dead `approval_token` writes removed | Cleaned from `approve_plan.sh`, `validate_plan_quality.sh`, `clear_plan_on_new_task.sh` | SEP-004 ✅ |
 | Automatic token generation on conversation start | Requires explicit `/new-token` | Needs SEP |
 | Orphaned plan file cleanup | 119+ orphaned plans, no cleanup mechanism | Needs design |
 | `PreCompact` hook for state snapshot | Not used | Optional enhancement |

@@ -439,13 +439,11 @@ assert_file_exists "${CLAUDE_TEST_PERSIST_DIR}/planning" "planning marker" \
     && pass
 teardown
 
-begin_test "4.3 clear_plan_on_new_task clears validation_log and approval_token"
+begin_test "4.3 clear_plan_on_new_task clears validation_log"
 setup
 echo "log entry" > "${CLAUDE_TEST_PERSIST_DIR}/validation_log"
-echo "token-123" > "${CLAUDE_TEST_PERSIST_DIR}/approval_token"
 run_hook "$CLEAR_TASK" "$(json_posttooluse EnterPlanMode)"
 assert_file_missing "${CLAUDE_TEST_PERSIST_DIR}/validation_log" "validation_log cleaned" \
-    && assert_file_missing "${CLAUDE_TEST_PERSIST_DIR}/approval_token" "approval_token cleaned" \
     && pass
 teardown
 
@@ -1814,6 +1812,184 @@ if echo "$HOOK_OUTPUT" | grep -q "token mismatch\|different conversation"; then
     fail "Token verification still present — should be removed"
 else
     pass
+fi
+teardown
+
+# ══════════════════════════════════════════════════════════════════
+# Section 16: Conversation-scoped plan directories (SEP-004)
+# ══════════════════════════════════════════════════════════════════
+echo ""
+echo "═══ Section 16: Conversation-Scoped Plan Directories (SEP-004) ═══"
+
+# 16.1 conversation_plan_dir returns token-scoped path when token is set
+begin_test "16.1 conversation_plan_dir returns token-scoped path"
+setup
+SAVED_PERSIST_DIR="$CLAUDE_TEST_PERSIST_DIR"
+unset CLAUDE_TEST_PERSIST_DIR
+RESULT=$(
+    source "${SCRIPTS_DIR}/common.sh"
+    CONVERSATION_TOKEN="test-token-xyz"
+    echo "$(conversation_plan_dir)"
+) 2>/dev/null
+export CLAUDE_TEST_PERSIST_DIR="$SAVED_PERSIST_DIR"
+if [[ "$RESULT" == *"/.claude/plans/test-token-xyz" ]]; then
+    pass
+else
+    fail "Expected token-scoped plan dir (got: $RESULT)"
+fi
+teardown
+
+# 16.2 conversation_plan_dir returns shared path when no token
+begin_test "16.2 conversation_plan_dir returns shared path without token"
+setup
+SAVED_PERSIST_DIR="$CLAUDE_TEST_PERSIST_DIR"
+unset CLAUDE_TEST_PERSIST_DIR
+RESULT=$(
+    source "${SCRIPTS_DIR}/common.sh"
+    CONVERSATION_TOKEN=""
+    echo "$(conversation_plan_dir)"
+) 2>/dev/null
+export CLAUDE_TEST_PERSIST_DIR="$SAVED_PERSIST_DIR"
+if [[ "$RESULT" == *"/.claude/plans" ]] && [[ "$RESULT" != *"/.claude/plans/" ]]; then
+    pass
+else
+    fail "Expected shared plan dir (got: $RESULT)"
+fi
+teardown
+
+# 16.3 conversation_plan_dir returns shared path when CLAUDE_TEST_PERSIST_DIR is set
+begin_test "16.3 conversation_plan_dir returns shared path in test mode"
+setup
+RESULT=$(
+    source "${SCRIPTS_DIR}/common.sh"
+    CONVERSATION_TOKEN="should-be-ignored"
+    echo "$(conversation_plan_dir)"
+) 2>/dev/null
+if [[ "$RESULT" == *"/.claude/plans" ]] && [[ "$RESULT" != *"/should-be-ignored" ]]; then
+    pass
+else
+    fail "Expected shared plan dir in test mode (got: $RESULT)"
+fi
+teardown
+
+# 16.4 Plans in conversation A's dir not visible to conversation B's newest_plan_file
+begin_test "16.4 Plan isolation: A's plans not visible to B"
+setup
+SAVED_PERSIST_DIR="$CLAUDE_TEST_PERSIST_DIR"
+unset CLAUDE_TEST_PERSIST_DIR
+CONV_A_DIR="${HOME}/.claude/plans/conv-a-token"
+CONV_B_DIR="${HOME}/.claude/plans/conv-b-token"
+mkdir -p "$CONV_A_DIR" "$CONV_B_DIR"
+cat > "${CONV_A_DIR}/plan-a.md" <<'EOF'
+## Objective
+Plan A objective for testing isolation between conversations.
+
+## Scope
+- /some/file-a.py
+EOF
+# cd to a clean temp dir so relative .claude/plans doesn't pollute results
+RESULT=$(
+    cd "$TEST_TMPDIR"
+    source "${SCRIPTS_DIR}/common.sh"
+    CONVERSATION_TOKEN="conv-b-token"
+    newest_plan_file 0 || true
+) 2>/dev/null
+export CLAUDE_TEST_PERSIST_DIR="$SAVED_PERSIST_DIR"
+if [[ -z "$RESULT" ]]; then
+    pass
+else
+    fail "Conversation B saw conversation A's plan: $RESULT"
+fi
+teardown
+
+# 16.5 newest_plan_file finds plans in own conversation directory
+begin_test "16.5 newest_plan_file finds plans in own conversation dir"
+setup
+SAVED_PERSIST_DIR="$CLAUDE_TEST_PERSIST_DIR"
+unset CLAUDE_TEST_PERSIST_DIR
+CONV_DIR="${HOME}/.claude/plans/conv-own-token"
+mkdir -p "$CONV_DIR"
+cat > "${CONV_DIR}/own-plan.md" <<'EOF'
+## Objective
+Own plan objective for testing same-conversation resolution.
+
+## Scope
+- /some/own-file.py
+EOF
+RESULT=$(
+    source "${SCRIPTS_DIR}/common.sh"
+    CONVERSATION_TOKEN="conv-own-token"
+    newest_plan_file 0
+) 2>/dev/null
+export CLAUDE_TEST_PERSIST_DIR="$SAVED_PERSIST_DIR"
+if [[ "$RESULT" == *"conv-own-token/own-plan.md" ]]; then
+    pass
+else
+    fail "Expected own plan (got: $RESULT)"
+fi
+teardown
+
+# 16.6 init_persist_dir uses SESSION_ID as primary token source
+begin_test "16.6 init_persist_dir prefers SESSION_ID over MEMORY.md token"
+setup
+PROJECT_KEY=$(pwd | tr '/' '-' | sed 's/^-//')
+MEM_DIR="${HOME}/.claude/projects/-${PROJECT_KEY}/memory"
+mkdir -p "$MEM_DIR"
+cat > "${MEM_DIR}/MEMORY.md" <<'MEMEOF'
+# Memory
+
+## Conversation Token
+`memory-token-should-lose`
+MEMEOF
+SAVED_PERSIST_DIR="$CLAUDE_TEST_PERSIST_DIR"
+unset CLAUDE_TEST_PERSIST_DIR
+DIR=$(
+    source "${SCRIPTS_DIR}/common.sh"
+    SESSION_ID="session-id-should-win"
+    init_persist_dir
+    echo "$PERSIST_DIR"
+) 2>/dev/null
+export CLAUDE_TEST_PERSIST_DIR="$SAVED_PERSIST_DIR"
+if [[ "$DIR" == *"/session-id-should-win" ]]; then
+    pass
+else
+    fail "Expected SESSION_ID in path (got: $DIR)"
+fi
+teardown
+
+# 16.7 init_persist_dir creates conversation plan directory
+begin_test "16.7 init_persist_dir creates conversation plan directory"
+setup
+SAVED_PERSIST_DIR="$CLAUDE_TEST_PERSIST_DIR"
+unset CLAUDE_TEST_PERSIST_DIR
+(
+    source "${SCRIPTS_DIR}/common.sh"
+    SESSION_ID="plandir-test-token"
+    init_persist_dir
+) 2>/dev/null
+export CLAUDE_TEST_PERSIST_DIR="$SAVED_PERSIST_DIR"
+if [[ -d "${HOME}/.claude/plans/plandir-test-token" ]]; then
+    pass
+else
+    fail "Expected conversation plan directory to be created"
+fi
+teardown
+
+# 16.8 Workflow state injection includes Session and Plan dir
+begin_test "16.8 Workflow state includes session and plan dir context"
+setup
+CHECK_CMD_16="${SCRIPTS_DIR}/check_clear_approval_command.sh"
+echo "1" > "${CLAUDE_TEST_PERSIST_DIR}/approved"
+echo "Build thing" > "${CLAUDE_TEST_PERSIST_DIR}/objective"
+echo "/src/thing.py" > "${CLAUDE_TEST_PERSIST_DIR}/scope"
+echo "Thing works" > "${CLAUDE_TEST_PERSIST_DIR}/criteria"
+PROMPT_JSON='{"session_id":"session-abc-123","prompt":"continue"}'
+run_hook "$CHECK_CMD_16" "$PROMPT_JSON"
+CONTEXT=$(echo "$HOOK_OUTPUT" | jq -r '.hookSpecificOutput.additionalContext // empty')
+if echo "$CONTEXT" | grep -q "Session:" && echo "$CONTEXT" | grep -q "Plan dir:"; then
+    pass
+else
+    fail "Expected Session: and Plan dir: in workflow state (got: ${CONTEXT:0:400})"
 fi
 teardown
 

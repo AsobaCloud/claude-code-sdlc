@@ -13,12 +13,6 @@ if ! approval_bundle_is_complete; then
     fi
 fi
 
-# Store conversation token with approval (SEP-005)
-CONV_TOKEN=$(read_conversation_token)
-if [[ -n "$CONV_TOKEN" ]]; then
-    state_write approval_token "$CONV_TOKEN"
-fi
-
 # Clean up planning state
 state_remove planning
 state_remove planning_started_at

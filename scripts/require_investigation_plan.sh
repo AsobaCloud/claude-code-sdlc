@@ -21,13 +21,14 @@ fi
 # ── diagnostic_mode active, no planning, no approval → block ──
 TOOL=$(tool_name)
 
+PLAN_DIR=$(conversation_plan_dir)
 deny_tool "BLOCKED: Diagnostic mode active — investigation plan required.
 
 Tool: ${TOOL}
 
 NEXT ACTION (4 steps in order):
 1. Call EnterPlanMode.
-2. Write investigation plan to ~/.claude/plans/<name>.md with ALL of: ## Objective (≥10 words), ## Hypothesis (≥15 words, include confidence levels), ## Investigation Steps (≥20 words), ## Scope, ## Success Criteria (≥10 words), ## Validation (≥20 words, what is known vs assumed).
+2. Write investigation plan to ${PLAN_DIR}/<name>.md with ALL of: ## Objective (≥10 words), ## Hypothesis (≥15 words, include confidence levels), ## Investigation Steps (≥20 words), ## Scope, ## Success Criteria (≥10 words), ## Validation (≥20 words, what is known vs assumed).
 3. Call ExitPlanMode.
 4. Then investigate.
 

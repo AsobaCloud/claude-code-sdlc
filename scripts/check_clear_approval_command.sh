@@ -143,6 +143,8 @@ if state_exists approved; then
 
     # Build the block
     WORKFLOW_STATE="── WORKFLOW STATE ──
+Session: ${SESSION_ID:-unknown}
+Plan dir: $(conversation_plan_dir)
 Plan: APPROVED | objective: \"${OBJECTIVE}\"
 Phase: ${PHASE}"
     [[ -n "$PHASE_DETAIL" ]] && WORKFLOW_STATE="${WORKFLOW_STATE} (${PHASE_DETAIL})"
@@ -159,8 +161,10 @@ Next: Continue implementing approved changes."
 
 elif state_exists planning; then
     WORKFLOW_STATE="── WORKFLOW STATE ──
+Session: ${SESSION_ID:-unknown}
+Plan dir: $(conversation_plan_dir)
 Phase: PLANNING (plan mode active)
-Next: Write your plan to a plan file, then call ExitPlanMode to get it approved."
+Next: Write your plan to $(conversation_plan_dir)/<name>.md, then call ExitPlanMode to get it approved."
 fi
 
 # Append workflow state to context if present

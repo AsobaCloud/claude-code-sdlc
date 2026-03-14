@@ -18,14 +18,31 @@ init_persist_dir() {
     if [[ -n "${CLAUDE_TEST_PERSIST_DIR:-}" ]]; then
         PROJECT_HASH="test"
         PERSIST_DIR="$CLAUDE_TEST_PERSIST_DIR"
+        CONVERSATION_TOKEN="${CONVERSATION_TOKEN:-}"
     else
         PROJECT_HASH=$(pwd | shasum | cut -c1-12)
-        local conv_token
-        conv_token=$(read_conversation_token 2>/dev/null) || true
-        local token_dir="${conv_token:-no-token}"
-        PERSIST_DIR="${HOME}/.claude/state/${PROJECT_HASH}/${token_dir}"
+        # Token priority: SESSION_ID > CONVERSATION_TOKEN env > MEMORY.md > no-token
+        if [[ -n "${SESSION_ID:-}" ]]; then
+            CONVERSATION_TOKEN="$SESSION_ID"
+        elif [[ -z "${CONVERSATION_TOKEN:-}" ]]; then
+            CONVERSATION_TOKEN=$(read_conversation_token 2>/dev/null) || true
+        fi
+        CONVERSATION_TOKEN="${CONVERSATION_TOKEN:-no-token}"
+        PERSIST_DIR="${HOME}/.claude/state/${PROJECT_HASH}/${CONVERSATION_TOKEN}"
     fi
     mkdir -p "$PERSIST_DIR"
+    mkdir -p "$(conversation_plan_dir)"
+}
+
+# ── Conversation-scoped plan directory ──
+conversation_plan_dir() {
+    if [[ -n "${CLAUDE_TEST_PERSIST_DIR:-}" ]]; then
+        echo "${HOME}/.claude/plans"
+    elif [[ -n "${CONVERSATION_TOKEN:-}" && "${CONVERSATION_TOKEN}" != "no-token" ]]; then
+        echo "${HOME}/.claude/plans/${CONVERSATION_TOKEN}"
+    else
+        echo "${HOME}/.claude/plans"
+    fi
 }
 
 # ── init_hook: read stdin, set up persist dir ──
@@ -107,7 +124,7 @@ newest_plan_file() {
 
     [[ "$min_time" =~ ^[0-9]+$ ]] || min_time=0
 
-    for dir in "${HOME}/.claude/plans" ".claude/plans"; do
+    for dir in "$(conversation_plan_dir)" ".claude/plans"; do
         [[ ! -d "$dir" ]] && continue
         while IFS= read -r -d '' f; do
             ftime=$(file_mtime "$f")

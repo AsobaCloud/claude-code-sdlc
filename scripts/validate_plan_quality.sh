@@ -10,9 +10,10 @@ ERRORS=""
 PLAN_FILE=$(resolve_plan_file_for_exit_plan)
 
 if [[ -z "$PLAN_FILE" ]]; then
-    deny_tool "BLOCKED: No plan file found in ~/.claude/plans/ or .claude/plans/
+    PLAN_DIR=$(conversation_plan_dir)
+    deny_tool "BLOCKED: No plan file found in ${PLAN_DIR}/ or .claude/plans/
 
-NEXT ACTION: Write your plan to ~/.claude/plans/<name>.md using the Write tool, then call ExitPlanMode."
+NEXT ACTION: Write your plan to ${PLAN_DIR}/<name>.md using the Write tool, then call ExitPlanMode."
 fi
 
 NEWEST_TIME=$(file_mtime "$PLAN_FILE")
@@ -314,12 +315,6 @@ echo "$HISTORY_LINE" >> "$PROJECT_MEM/plan-history.md"
 SHARED_MEM="$HOME/.claude/shared-memory"
 if [[ -d "$SHARED_MEM" ]]; then
     echo "$HISTORY_LINE" >> "$SHARED_MEM/plan-history.md"
-fi
-
-# Store conversation token with approval (SEP-005)
-CONV_TOKEN=$(read_conversation_token)
-if [[ -n "$CONV_TOKEN" ]]; then
-    state_write approval_token "$CONV_TOKEN"
 fi
 
 # Clean up planning state
