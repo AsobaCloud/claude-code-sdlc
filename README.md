@@ -21,22 +21,23 @@ Four enforcement layers, each backed by shell scripts that block tool execution 
 ### Layer 1: Plan Gate (Edit/Write Blocking)
 **No code changes without an approved plan.** Every `Edit`, `Write`, and `NotebookEdit` call is intercepted by `require_plan_approval.sh`. If no approval markers exist, the tool is blocked with instructions telling the model exactly what to do.
 
-### Layer 2: Exploration Tracking
-**The model must actually read before it plans.** When `EnterPlanMode` fires, `clear_plan_on_new_task.sh` creates a planning marker and resets an exploration counter to zero. Every subsequent `Read`, `Glob`, or `Grep` call increments the counter via `track_exploration.sh`. This runs in <5ms and does nothing outside plan mode.
+### Layer 2: Planning Cycle Markers
+**The model must explicitly enter planning mode before code changes.** When `EnterPlanMode` fires, `clear_plan_on_new_task.sh` clears the previous task state and writes planning markers for the new plan cycle. Exploration is still required by `CLAUDE.md`, but the current runtime verifies it indirectly through grounded plan evidence rather than a dedicated read counter hook.
 
 ### Layer 3: Plan Quality Gate
 **The plan must be substantive.** When the model calls `ExitPlanMode`, `validate_plan_quality.sh` runs as a PreToolUse hook and checks:
 
 | Check | Requirement | Why |
 |-------|-------------|-----|
-| Exploration depth | >= 3 reads/searches | Forces the model to actually look at docs and code |
 | Plan file exists | `.md` file in `~/.claude/plans/` or `.claude/plans/` | No plan = no approval |
-| Plan freshness | < 30 minutes old | Prevents stale plans from prior sessions |
+| Plan freshness | < 4 hours old | Prevents stale plans from prior sessions |
 | Plan substance | >= 50 words | Blocks one-liner "plans" |
 | File references | At least one file path | Plan must reference real files |
 | Exploration evidence | Keywords like "existing", "found", "current" | Plan must describe what was discovered |
-| Required sections | `## Objective` (10+ words), `## Scope` (file paths), `## Success Criteria` (10+ words), `## Justification` (cites project files + reasoning) | Enforces structured planning |
-| Exploration cross-ref | Plan mentions >= 2 files from exploration log | Proves the plan builds on actual exploration, not assumptions |
+| Required sections | `## Objective`, `## Scope`, `## Success Criteria`, `## Justification`, `## Validation` | Enforces structured planning |
+| Objective verification | `## Objective Verification` for code-change plans | Ties completion to a real end-to-end proof step |
+| Scope format | `## Scope` entries must be full absolute paths | Lets scope enforcement stay fail-closed |
+| SEP reference | `SEP-NNN` required unless project is exempt | Keeps plan and commit history traceable |
 
 If any check fails, `ExitPlanMode` is blocked and the model gets a specific error message telling it what's missing.
 
@@ -85,19 +86,17 @@ Approval clears only when:
 
 | Script | Hook | Purpose |
 |--------|------|---------|
-| `common.sh` | — | Shared library: state helpers, persistent state, session hydration |
+| `common.sh` | — | Shared library: state helpers and persist-only project state |
 | `require_plan_approval.sh` | PreToolUse: Edit\|Write\|NotebookEdit | Blocks code changes without approval markers |
-| `validate_plan_quality.sh` | PreToolUse: ExitPlanMode | Quality gate — checks exploration + plan substance |
+| `validate_plan_quality.sh` | PreToolUse: ExitPlanMode | Quality gate — checks plan substance, evidence, and objective verification |
 | `approve_plan.sh` | PostToolUse: ExitPlanMode | Creates approval markers (session + persistent) |
-| `clear_plan_on_new_task.sh` | PostToolUse: EnterPlanMode | Clears old approval, starts exploration tracking |
-| `track_exploration.sh` | PreToolUse: Read\|Glob\|Grep | Increments exploration counter during planning |
+| `clear_plan_on_new_task.sh` | PostToolUse: EnterPlanMode | Clears old approval and starts a new planning cycle |
 | `check_clear_approval_command.sh` | UserPromptSubmit | No-op — approval persists across messages |
 | `guard_destructive_bash.sh` | PreToolUse: Bash | Guards against destructive shell commands |
 | `accept_outcome.sh` | Via `/accept` command | Clears approval after user accepts implementation |
 | `reject_outcome.sh` | Via `/reject` command | Clears approval after user rejects implementation |
 | `restore_approval.sh` | Manual | Emergency escape hatch — restores persistent approval |
 | `clear_approval.sh` | Manual | Force-clear approval markers |
-| `cleanup_session.sh` | SessionEnd | Cleans up session state directory |
 | `cleanup_stale_sessions.sh` | SessionStart | Removes session dirs older than 6 hours |
 | `strip-claude-coauthor.sh` | Git hook | Removes "Co-Authored-By: Claude" from commit messages |
 
@@ -113,10 +112,9 @@ Approval clears only when:
 
 | Location | Scope | Survives sessions? |
 |----------|-------|--------------------|
-| `/tmp/.claude_hooks/{session_id}/` | Session-specific (planning, explore_count) | No |
-| `~/.claude/state/{project_hash}/` | Project-specific (approval, scope, criteria) | Yes |
+| `~/.claude/state/{project_hash}/` | Project-specific (approval, scope, dirty, validation, planning markers) | Yes |
 
-On session start, `common.sh` hydrates session state from persistent state automatically.
+The current hook state is persist-only per project. Approval, planning markers, and validation progress all live under `~/.claude/state/{project_hash}/`.
 
 ### Git Hooks (`git-hooks/`)
 

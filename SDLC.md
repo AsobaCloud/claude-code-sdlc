@@ -22,21 +22,21 @@ Every task flows through six phases. Each phase has a gate — a hook script tha
 ```
  [1. Explore] ──► [2. Plan] ──► [3. Review] ──► [4. Implement] ──► [5. Validate] ──► [6. Complete]
       │                │              │                │                  │                │
-  track_          validate_       /approve         require_plan_     track_dirty.sh    /accept
-  exploration.sh  plan_quality.sh  (human gate)    approval.sh       track_            /reject
-  (3+ reads)      (quality gate)                   (scope gate)      validation.sh
+  First Action     validate_       /approve         require_plan_     track_dirty.sh    /accept
+  Protocol in      plan_quality.sh  (human gate)    approval.sh       track_            /reject
+  CLAUDE.md        (quality gate)                   (scope gate)      validation.sh
                                                                      (two-tier gate)
 ```
 
 ### Phase 1: Exploration
 
-**What:** Claude must read at least 3 files before it can plan.
+**What:** Claude must explore the docs and code before it plans, and the plan must show evidence of that exploration.
 
-**How:** `track_exploration.sh` runs as a PreToolUse hook on `Read|Glob|Grep`. During planning mode, every read/search increments an exploration counter. `validate_plan_quality.sh` checks this counter — if fewer than 3 explorations occurred, the plan is rejected.
+**How:** `clear_plan_on_new_task.sh` starts a fresh planning cycle by clearing prior task state and writing planning markers. The current runtime no longer counts reads through a dedicated exploration hook; instead, `validate_plan_quality.sh` enforces grounded planning indirectly by requiring concrete file references and exploration-evidence language in the plan.
 
-**Why:** Without this gate, Claude writes plans based on what it *assumes* your code looks like based on its training data. The exploration requirement forces it to actually look at your docs, your existing code, and the area it's about to change. Plans grounded in your actual codebase are qualitatively different from plans grounded in pattern-matched assumptions.
+**Why:** Without this expectation, Claude writes plans based on what it *assumes* your code looks like based on its training data. Requiring the plan to cite real files and describe the current codebase keeps planning grounded in the repository rather than in pattern-matched assumptions.
 
-**Enforcement script:** `scripts/track_exploration.sh` (runs in <5ms, no-op outside plan mode)
+**Enforcement scripts:** `scripts/clear_plan_on_new_task.sh`, `scripts/validate_plan_quality.sh`
 
 ### Phase 2: Planning
 
@@ -47,12 +47,14 @@ Every task flows through six phases. Each phase has a gate — a hook script tha
 | Check | Requirement | Purpose |
 |-------|-------------|---------|
 | Plan file exists | `.md` in `~/.claude/plans/` or `.claude/plans/` | No plan = no approval |
-| Plan freshness | < 30 minutes old | Prevents stale plans from prior sessions |
+| Plan freshness | < 4 hours old | Prevents stale plans from prior sessions |
 | Word count | >= 50 words | Blocks one-liner "plans" |
-| Required sections | `## Objective` (10+ words), `## Scope` (file paths), `## Success Criteria` (10+ words), `## Justification` | Enforces structured thinking |
+| Required sections | `## Objective`, `## Scope`, `## Success Criteria`, `## Justification`, `## Validation` | Enforces structured thinking |
+| Objective verification | `## Objective Verification` for code-change plans | Ties completion to a real end-to-end proof step |
+| Scope format | Scope entries must be full absolute paths | Keeps scope enforcement fail-closed |
 | Exploration evidence | Keywords like "existing", "found", "current" | Plan must describe what was discovered |
-| Cross-reference | Plan mentions >= 2 files from exploration log | Proves the plan builds on actual exploration |
 | File references | At least one file path in plan body | Plan must reference real files |
+| SEP reference | `SEP-NNN` unless the project is exempt | Keeps plans and commits traceable |
 
 **Why:** A good plan is the highest-leverage artifact in the entire workflow. It forces Claude to articulate *what it found* during exploration and *how it will change things*. This is where training-data assumptions get caught — if the plan says "I'll create a new caching utility" but exploration showed you already have one, the human catches it at review. Without structured planning, Claude jumps straight to code and the human only discovers misalignment after implementation.
 
@@ -80,31 +82,31 @@ Every task flows through six phases. Each phase has a gate — a hook script tha
 
 ### Phase 5: Validation
 
-**What:** Code changes must be validated by both unit tests and E2E/integration tests before the task can complete.
+**What:** Code changes must be validated, and the approved plan objective must be proven against the real system before the task can complete.
 
 **How:** Two scripts work together:
 - `track_dirty.sh` (PostToolUse on `Edit|Write|NotebookEdit`) — sets a `dirty` flag whenever a non-exempt file is edited
 - `track_validation.sh` (PostToolUse on `Bash`) — detects test runner commands and manages two-tier validation
 
-The two-tier system (introduced in SEP-005) requires:
+The two-tier system (introduced in SEP-005) records:
 1. A **unit test** command must pass (npm test, pytest, go test, cargo test, etc.)
 2. An **E2E/integration test** command must pass (commands containing e2e, integration, cypress, playwright, etc.)
 
-Only when both tiers pass does the `dirty` flag clear. Running only one tier records progress but doesn't unlock completion.
+For code-change plans, that is not sufficient on its own. The approved `## Objective Verification` step must also be recorded for the current `plan_hash`. Running only the tiered tests records progress but does not unlock completion unless the objective proof exists.
 
-**Why:** Code isn't done until it's tested. The dirty flag prevents Claude from declaring victory after writing code but before verifying it works. The two-tier requirement ensures both fine-grained correctness (unit) and system-level behavior (E2E) are verified. Without this, Claude's natural tendency is to write code, say "implementation complete," and move on — leaving the human to discover test failures later.
+**Why:** Code isn't done until the approved objective is shown to work. The dirty flag prevents Claude from declaring victory after writing code but before verifying it works. Unit and integration tests are useful, but the completion gate must be tied to the actual task objective, not just generic green tests.
 
 **Enforcement scripts:** `scripts/track_dirty.sh`, `scripts/track_validation.sh`
 
 ### Phase 6: Completion
 
-**What:** The human explicitly accepts or rejects the implementation.
+**What:** The human explicitly accepts or rejects the implementation, but the agent cannot complete unless the current plan objective is verified or the user manually bypasses the missing proof.
 
 **How:** Two plugin commands:
-- `/accept` — calls `accept_outcome.sh`, clears approval markers, signals satisfaction
+- `/accept` — runs an acceptance preflight in `accept_outcome.sh`; if objective proof is missing it blocks on the first invocation and only the user can manually bypass by invoking `/accept` again
 - `/reject` — calls `reject_outcome.sh`, clears approval markers, forces re-planning
 
-**Why:** Explicit completion closes the feedback loop. Without it, there's ambiguity about whether a task is done — Claude might keep making changes, or the human might forget to review. `/accept` and `/reject` create a clean boundary: the task is either done or it needs another cycle. This also resets the system state so the next task starts fresh.
+**Why:** Explicit completion closes the feedback loop, but it must not become an agent-controlled bypass. The human can accept risk; the agent cannot. The first `/accept` is therefore a gate check, not a silent override.
 
 **Enforcement scripts:** `scripts/accept_outcome.sh`, `scripts/reject_outcome.sh`
 
@@ -159,7 +161,7 @@ Instructions in `CLAUDE.md` tell Claude what to do. Hooks in `settings.json` *ma
 
 ### Fail-closed by default
 
-When in doubt, block. A missing approval marker means edits are blocked. A missing exploration counter means the plan is rejected. A missing SEP reference means the commit is blocked. The system defaults to "no" and requires evidence to get to "yes." False positives (blocking legitimate work) are solved by escape hatches (`/approve`, `restore_approval.sh`); false negatives (letting bad work through) are much harder to fix after the fact.
+When in doubt, block. A missing approval marker means edits are blocked. A thin or weakly evidenced plan is rejected. A missing SEP reference means the commit is blocked. The system defaults to "no" and requires evidence to get to "yes." False positives (blocking legitimate work) are solved by escape hatches (`/approve`, `restore_approval.sh`); false negatives (letting bad work through) are much harder to fix after the fact.
 
 ### Human-in-the-loop at decision points
 
@@ -167,7 +169,7 @@ The system automates judgment-free checks (word counts, file existence, test run
 
 ### Evidence over assumption
 
-The epistemology rule in `CLAUDE.md` states: "Treat your training knowledge as an unreliable prior." The exploration requirement, plan cross-referencing, and investigation protocol all serve this principle. Claude must cite what it found, not what it assumed. The validation section in plans makes this explicit: what is verified vs. what is assumed.
+The epistemology rule in `CLAUDE.md` states: "Treat your training knowledge as an unreliable prior." The exploration requirement, plan evidence checks, and investigation protocol all serve this principle. Claude must cite what it found, not what it assumed. The validation section in plans makes this explicit: what is verified vs. what is assumed.
 
 ### Minimal friction for correct behavior
 
@@ -188,11 +190,11 @@ A model doing its job properly — exploring, planning, implementing within scop
 User gives task
       │
       ▼
-┌─────────────┐    track_exploration.sh     ┌─────────────┐   validate_plan_quality.sh
-│ 1. EXPLORE  │ ──────── 3+ reads ────────► │  2. PLAN    │ ──── quality checks ────►
-│             │    Read, Glob, Grep          │             │   50+ words, sections,
-│ Read docs   │    counted during            │ Write plan  │   cross-refs, freshness
-│ Read code   │    planning mode             │ to .md file │
+┌─────────────┐   First Action Protocol     ┌─────────────┐   validate_plan_quality.sh
+│ 1. EXPLORE  │ ── docs/code exploration ─► │  2. PLAN    │ ──── quality checks ────►
+│             │                              │             │   50+ words, sections,
+│ Read docs   │                              │ Write plan  │   evidence, freshness
+│ Read code   │                              │ to .md file │
 │ Search      │                              │             │
 └─────────────┘                              └─────────────┘
                                                                        │
@@ -219,10 +221,9 @@ User gives task
 
 | Location | Scope | Survives sessions? |
 |----------|-------|--------------------|
-| `/tmp/.claude_hooks/{session_id}/` | Session-specific (planning, explore_count) | No |
-| `~/.claude/state/{project_hash}/` | Project-specific (approval, scope, dirty, validated) | Yes |
+| `~/.claude/state/{project_hash}/` | Project-specific (approval, scope, dirty, validated, planning markers) | Yes |
 
-On session start, `common.sh` hydrates session state from persistent state. This means approval, dirty flags, and validation progress carry across sessions automatically.
+The current hook state is persist-only per project. Approval, dirty flags, planning markers, and validation progress all carry across sessions automatically.
 
 ## Further Reading
 

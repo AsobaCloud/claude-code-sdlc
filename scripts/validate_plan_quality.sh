@@ -12,7 +12,7 @@ PLAN_FILE=$(resolve_plan_file_for_exit_plan)
 if [[ -z "$PLAN_FILE" ]]; then
     deny_tool "BLOCKED: No plan file found in ~/.claude/plans/ or .claude/plans/
 
-NEXT ACTION: Write your plan to a .md file in the plans directory, then call ExitPlanMode."
+NEXT ACTION: Write your plan to ~/.claude/plans/<name>.md using the Write tool, then call ExitPlanMode."
 fi
 
 NEWEST_TIME=$(file_mtime "$PLAN_FILE")
@@ -23,7 +23,7 @@ if [[ "$AGE" -gt 14400 ]]; then
     ERRORS+="STALE PLAN: $(( AGE / 60 )) minutes old (max 240).
   File: $PLAN_FILE
 
-  NEXT ACTION: Update the plan file, then call ExitPlanMode again.
+  NEXT ACTION: Open the plan file with Read, review the content, make any necessary updates with Edit, then call ExitPlanMode. Do NOT make trivial edits just to reset the timestamp.
 
 "
 fi
@@ -175,7 +175,7 @@ else
         SCOPE_CONTENT=$(echo "$PLAN_CONTENT" | sed -n '/^##[[:space:]]*[Ss]cope/,/^##/p' | tail -n +2 | grep -v '^## ')
         SCOPE_LINES=$(echo "$SCOPE_CONTENT" | grep -E '^\s*-\s+/')
         if [[ -z "$SCOPE_LINES" ]]; then
-            ERRORS+="## Scope entries must be full absolute paths (e.g., - /Users/shingi/project/file.ext).
+            ERRORS+="## Scope entries must be EXACT absolute filesystem paths. Format: '- /absolute/path/to/file.ext' (one per line). PROHIBITED: backticks, '(new)', comments, annotations, relative paths, glob patterns. Only literal paths that exist or will be created.
 
 "
         fi
@@ -205,13 +205,13 @@ else
         JUST_CONTENT=$(echo "$PLAN_CONTENT" | sed -n '/^##[[:space:]]*[Jj]ustification/,/^##/p' | head -50 | tail -n +2 | grep -v '^## ')
 
         if ! echo "$JUST_CONTENT" | grep -qE '(docs/|scripts/|tools/|assets/|scenes/|CLAUDE\.md|README|\.gd|\.md|\.tscn|\.tres|\.sh|\.json|\.py|\.js|\.ts)'; then
-            ERRORS+="## Justification has no project file citations.
+            ERRORS+="## Justification must cite specific project files you read. Pattern: 'Because [path/to/file.ext] shows [what you found], this plan [does X].' Do NOT add file names without explaining what they told you.
 
 "
         fi
 
         if ! echo "$JUST_CONTENT" | grep -qiE '(because|consistent with|per |therefore|aligns with|following the|in line with|as documented|as specified|this follows|this matches)'; then
-            ERRORS+="## Justification lacks reasoning language (because, per, therefore, etc.).
+            ERRORS+="## Justification must contain causal reasoning connecting evidence to your approach. Use 'because', 'therefore', 'per', etc. to explain WHY, not just WHAT.
 
 "
         fi
@@ -248,14 +248,36 @@ else
         fi
     fi
 
+    # Objective Verification (required for code-change plans)
+    if plan_requires_objective_verification "$PLAN_FILE"; then
+        if ! echo "$PLAN_CONTENT" | grep -qiE '^##\s+Objective\s+Verification'; then
+            ERRORS+="MISSING ## Objective Verification section.
+  Code-change plans must define the real end-to-end verification step for the plan objective.
+
+"
+        else
+            OBJ_VERIFY_CONTENT=$(extract_plan_objective_verification "$PLAN_FILE")
+            OBJ_VERIFY_WORDS=$(echo "$OBJ_VERIFY_CONTENT" | wc -w | tr -d ' ')
+            if [[ "$OBJ_VERIFY_WORDS" -lt 10 ]]; then
+                ERRORS+="## Objective Verification too short ($OBJ_VERIFY_WORDS words, minimum 10).
+  Describe the real end-to-end verification step that proves the objective works.
+
+"
+            fi
+        fi
+    fi
+
     # ── Check 6: SEP issue reference (skip for exempt projects) ──
     if [[ ! -f "${CLAUDE_PROJECT_DIR:-.}/.sep-exempt" ]]; then
         SEP_REF=$(echo "$PLAN_CONTENT" | grep -oE 'SEP-[0-9]+' | head -1)
         if [[ -z "$SEP_REF" ]]; then
             ERRORS+="NO SEP REFERENCE: Plan must reference a SEP issue (e.g., 'Implements SEP-003').
 
-  NEXT ACTION: Run ~/.claude/scripts/sep_create.sh \"title\" to create one,
-  then add 'SEP-NNN' to your plan's Objective section.
+  NEXT ACTION (4 steps in order):
+  1. List existing SEPs: ls ~/.claude/.sep/ or ls .sep/
+  2. If none fits, create one: ~/.claude/scripts/sep_create.sh 'title' 'summary' 'motivation' 'change' 'criteria'
+  3. Add 'Implements SEP-NNN' to your plan's ## Objective.
+  4. Call ExitPlanMode again.
 
 "
         fi
@@ -307,5 +329,5 @@ state_remove planning_started_at
 if [[ "$IS_INVESTIGATION" == "true" ]]; then
     allow_with_context "Investigation plan approved. Tools unlocked. Execute your investigation systematically, citing evidence for every finding. When done, run ~/.claude/scripts/clear_approval.sh then tell the user to /accept or /reject."
 else
-    allow_with_context "Plan approved. Editing unlocked. Implement ONLY the approved changes. When done, run ~/.claude/scripts/clear_approval.sh then tell the user to /accept or /reject."
+    allow_with_context "Plan approved. Editing unlocked. Implement ONLY the approved changes. Before calling clear_approval.sh, record objective verification for the approved plan using ~/.claude/scripts/record_validation.sh --command \"<approved verification command>\". If you cannot verify the objective, report objective unverified and stop. Do NOT tell the user to /accept unless objective verification has been recorded."
 fi

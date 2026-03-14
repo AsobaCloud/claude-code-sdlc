@@ -25,10 +25,10 @@ deny_tool "BLOCKED: Diagnostic mode active — investigation plan required.
 
 Tool: ${TOOL}
 
-You asked a diagnostic question. Before investigating, you must:
-1. Call EnterPlanMode (this is the only tool available right now)
-2. Write an investigation plan with ## Hypothesis, ## Investigation Steps, ## Scope
-3. Call ExitPlanMode to get it approved
-4. Then all tools will be unlocked for systematic investigation.
+NEXT ACTION (4 steps in order):
+1. Call EnterPlanMode.
+2. Write investigation plan to ~/.claude/plans/<name>.md with ALL of: ## Objective (≥10 words), ## Hypothesis (≥15 words, include confidence levels), ## Investigation Steps (≥20 words), ## Scope, ## Success Criteria (≥10 words), ## Validation (≥20 words, what is known vs assumed).
+3. Call ExitPlanMode.
+4. Then investigate.
 
 The user can type /skip-investigation to bypass this requirement."

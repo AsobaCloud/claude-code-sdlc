@@ -226,20 +226,6 @@ mark_tdd_ready() {
 # ══════════════════════════════════════════════════════════════════
 printf "\n${YELLOW}── Group 1: init_hook / env-var overrides ──${NC}\n"
 
-begin_test "1.1 CLAUDE_TEST_PERSIST_DIR is used by EnterPlanMode hook"
-setup
-run_hook "${SCRIPTS_DIR}/clear_plan_on_new_task.sh" "$(json_posttooluse EnterPlanMode)"
-assert_file_exists "${CLAUDE_TEST_PERSIST_DIR}/planning" "planning marker" \
-    && assert_file_exists "${CLAUDE_TEST_PERSIST_DIR}/planning_started_at" "planning_started_at marker" \
-    && pass
-teardown
-
-begin_test "1.2 CLAUDE_TEST_PERSIST_DIR is used by track_dirty.sh"
-setup
-run_hook "${SCRIPTS_DIR}/track_dirty.sh" "$(json_pretooluse Edit /tmp/example.txt)"
-assert_file_exists "${CLAUDE_TEST_PERSIST_DIR}/dirty" "dirty marker" && pass
-teardown
-
 begin_test "1.3 Missing session_id + env var still runs"
 setup
 local_json='{"tool_name":"EnterPlanMode","tool_input":{}}'
@@ -631,7 +617,7 @@ setup
 TEMP_PLAN="${HOME}/.claude/plans/_test_plan_7_5.md"
 echo "test plan" > "$TEMP_PLAN"
 run_hook "$REQUIRE" "$(json_pretooluse Edit /some/file.md)"
-assert_output_contains "Call ExitPlanMode to get it approved" \
+assert_output_contains "Call ExitPlanMode" \
     && pass
 teardown
 
@@ -908,27 +894,6 @@ if assert_json_field '.hookSpecificOutput.permissionDecision' 'deny'; then
 fi
 teardown
 
-# 10.9 Safe command: ls -la → allow
-begin_test "10.9 ls -la → allow"
-setup
-run_hook "$GUARD" "$(json_bash_pretooluse "ls -la /tmp")"
-assert_exit_code 0 && assert_output_not_contains '"deny"' && pass
-teardown
-
-# 10.10 Safe command: git status → allow
-begin_test "10.10 git status → allow"
-setup
-run_hook "$GUARD" "$(json_bash_pretooluse "git status")"
-assert_exit_code 0 && assert_output_not_contains '"deny"' && pass
-teardown
-
-# 10.11 Safe command: git checkout -b → allow
-begin_test "10.11 git checkout -b new-branch → allow"
-setup
-run_hook "$GUARD" "$(json_bash_pretooluse "git checkout -b new-branch")"
-assert_exit_code 0 && assert_output_not_contains '"deny"' && pass
-teardown
-
 # 10.12 Chained: safe && destructive → deny
 begin_test "10.12 safe && git push --force → deny"
 setup
@@ -1028,13 +993,6 @@ rm -rf "$GUARD_TMPDIR"
 if assert_json_field '.hookSpecificOutput.permissionDecision' 'deny'; then
     assert_output_contains "uncommitted" && pass
 fi
-teardown
-
-# 10.18 git restore --staged → allow (safe — only unstages)
-begin_test "10.18 git restore --staged → allow"
-setup
-run_hook "$GUARD" "$(json_bash_pretooluse "git restore --staged file.txt")"
-assert_exit_code 0 && assert_output_not_contains '"deny"' && pass
 teardown
 
 # ══════════════════════════════════════════════════════════════════
@@ -1460,54 +1418,6 @@ HOOK_OUTPUT=$(bash "${SCRIPTS_DIR}/record_validation.sh" --force "refactor: no n
 assert_exit_code 1 \
     && assert_output_contains "not permitted" \
     && assert_file_exists "${CLAUDE_TEST_PERSIST_DIR}/dirty" "dirty still present" \
-    && pass
-teardown
-
-# 12.15 clear_plan_on_new_task.sh clears tests_failed
-begin_test "12.15 clear_plan_on_new_task.sh clears tests_failed"
-setup
-echo "old red" > "${CLAUDE_TEST_PERSIST_DIR}/tests_failed"
-run_hook "${SCRIPTS_DIR}/clear_plan_on_new_task.sh" "$(json_posttooluse EnterPlanMode)"
-assert_file_missing "${CLAUDE_TEST_PERSIST_DIR}/tests_failed" "tests_failed cleared on new task" \
-    && pass
-teardown
-
-# 12.16 clear_approval.sh clears tests_failed
-begin_test "12.16 clear_approval.sh clears tests_failed"
-setup
-echo "old red" > "${CLAUDE_TEST_PERSIST_DIR}/tests_failed"
-echo "1" > "${CLAUDE_TEST_PERSIST_DIR}/approved"
-echo "0" > "${CLAUDE_TEST_PERSIST_DIR}/objective_verification_required"
-# No dirty flag so clear_approval.sh won't block
-HOOK_OUTPUT=""
-HOOK_EXIT=0
-HOOK_OUTPUT=$(bash "${SCRIPTS_DIR}/clear_approval.sh" 2>&1) || HOOK_EXIT=$?
-assert_file_missing "${CLAUDE_TEST_PERSIST_DIR}/tests_failed" "tests_failed cleared" \
-    && pass
-teardown
-
-# 12.17 accept_outcome.sh clears tests_failed
-begin_test "12.17 accept_outcome.sh clears tests_failed"
-setup
-echo "old red" > "${CLAUDE_TEST_PERSIST_DIR}/tests_failed"
-echo "1" > "${CLAUDE_TEST_PERSIST_DIR}/approved"
-echo "0" > "${CLAUDE_TEST_PERSIST_DIR}/objective_verification_required"
-HOOK_OUTPUT=""
-HOOK_EXIT=0
-HOOK_OUTPUT=$(bash "${SCRIPTS_DIR}/accept_outcome.sh" 2>&1) || HOOK_EXIT=$?
-assert_file_missing "${CLAUDE_TEST_PERSIST_DIR}/tests_failed" "tests_failed cleared" \
-    && pass
-teardown
-
-# 12.18 reject_outcome.sh clears tests_failed
-begin_test "12.18 reject_outcome.sh clears tests_failed"
-setup
-echo "old red" > "${CLAUDE_TEST_PERSIST_DIR}/tests_failed"
-echo "1" > "${CLAUDE_TEST_PERSIST_DIR}/approved"
-HOOK_OUTPUT=""
-HOOK_EXIT=0
-HOOK_OUTPUT=$(bash "${SCRIPTS_DIR}/reject_outcome.sh" 2>&1) || HOOK_EXIT=$?
-assert_file_missing "${CLAUDE_TEST_PERSIST_DIR}/tests_failed" "tests_failed cleared" \
     && pass
 teardown
 

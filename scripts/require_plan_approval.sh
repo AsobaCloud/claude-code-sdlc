@@ -29,15 +29,13 @@ if ! state_exists approved; then
 
 A plan file exists at: ${EXISTING_PLAN}
 
-NEXT ACTION: Call ExitPlanMode to get it approved.
-If you need a different plan, call EnterPlanMode first."
+NEXT ACTION: Call ExitPlanMode now. Do NOT call EnterPlanMode — that will delete this plan."
     else
         deny_tool "BLOCKED: No approved plan for this work.
 
-NEXT ACTION: Call EnterPlanMode to start planning.
-Then: explore code → write plan → call ExitPlanMode for approval.
+No plan file exists — you must create one.
 
-If you already had approval, ask the user to type /approve."
+NEXT ACTION: Call EnterPlanMode now. Then write a plan to ~/.claude/plans/<name>.md, then call ExitPlanMode."
     fi
 fi
 
@@ -46,6 +44,8 @@ METADATA_ERRORS=""
 PLAN_FILE=$(normalize_plan_path "$(state_read plan_file)")
 SCOPE_CONTENT=$(state_read scope)
 APPROVED_PLAN_HASH=$(state_read plan_hash)
+OBJECTIVE_VERIFICATION_REQUIRED=$(state_read objective_verification_required)
+OBJECTIVE_VERIFICATION=$(state_read objective_verification)
 
 if [[ -z "$PLAN_FILE" ]]; then
     METADATA_ERRORS+="  - Missing plan_file marker.
@@ -71,12 +71,20 @@ if [[ -z "$SCOPE_CONTENT" ]]; then
 "
 fi
 
+if [[ -z "$OBJECTIVE_VERIFICATION_REQUIRED" ]]; then
+    METADATA_ERRORS+="  - Missing objective_verification_required marker.
+"
+elif [[ "$OBJECTIVE_VERIFICATION_REQUIRED" == "1" && -z "$OBJECTIVE_VERIFICATION" ]]; then
+    METADATA_ERRORS+="  - Missing objective_verification marker for a code-change plan.
+"
+fi
+
 if [[ -n "$METADATA_ERRORS" ]]; then
     deny_tool "BLOCKED: Approval metadata is stale or incomplete.
 
 Detected issues:
 ${METADATA_ERRORS}
-NEXT ACTION: Re-approve the current plan (ExitPlanMode or /approve) before editing."
+NEXT ACTION: Tell the user to type /approve to rebuild approval metadata. Do NOT call ExitPlanMode."
 fi
 
 # ── Conversation token verification (SEP-005) ──
@@ -86,12 +94,12 @@ if [[ -n "$APPROVAL_TOKEN" ]]; then
     if [[ -z "$CURRENT_TOKEN" ]]; then
         deny_tool "BLOCKED: No conversation token found. This session has no token in MEMORY.md.
 
-NEXT ACTION: Run /new-token to initialize a conversation token, then /approve to associate it with the current plan."
+NEXT ACTION: Step 1: Run /new-token. Step 2: Tell the user to type /approve."
     fi
     if [[ "$CURRENT_TOKEN" != "$APPROVAL_TOKEN" ]]; then
         deny_tool "BLOCKED: Approval belongs to a different conversation (token mismatch).
 
-NEXT ACTION: Re-plan with EnterPlanMode, or run /approve to claim the existing plan for this conversation."
+NEXT ACTION: Tell the user to type /approve to claim this plan for the current conversation. Do NOT call EnterPlanMode — that will delete the existing plan and all approval state."
     fi
 fi
 
@@ -110,7 +118,11 @@ File: $FILE_PATH
 Approved scope:
 $(echo "$SCOPE_CONTENT" | sed 's/^/  - /')
 
-To modify this file, update your plan's ## Scope section and get re-approval."
+NEXT ACTION (3 steps in order):
+1. Edit your plan file: add '- ${FILE_PATH}' to ## Scope (exact absolute path, no annotations, no '(new)', no backticks, no comments).
+2. Call ExitPlanMode to re-approve.
+3. Retry this edit.
+Do NOT retry this edit before completing steps 1-2. PROHIBITED in scope entries: backticks, (new), relative paths, glob patterns."
 fi
 
 # ── TDD red-green gate ──
@@ -133,11 +145,10 @@ if [[ "$IS_TEST_FILE" == "false" && "$IS_DOC_FILE" == "false" ]]; then
     if ! state_exists tests_failed; then
         deny_tool "TDD ENFORCEMENT: Tests must fail first.
 
-Write your tests, then run them. They must FAIL against the current code
-(proving they test new behavior). Only then can you edit production code.
-
-If this is a refactor with no new behavior, use:
-~/.claude/scripts/record_validation.sh --force \"refactor: no new behavior\""
+NEXT ACTION (3 steps in order):
+1. Write tests to a test file (patterns: test_*.py, *_test.go, *.test.ts, *.spec.ts, or any file under tests/test/__tests__/spec/ directories).
+2. Run them with a recognized test runner (pytest, npm test, go test, cargo test, bun test, etc.).
+3. They must EXIT NON-ZERO (fail). Only a non-zero exit unlocks production code editing."
     fi
     if ! state_exists tests_reviewed; then
         deny_tool "TEST REVIEW GATE: Present tests to user for review.
@@ -176,8 +187,8 @@ $(state_read criteria)
 fi
 CONTEXT+="── CONSTRAINT ──
 Edit #${EDIT_COUNT}. ONLY make changes described in the approved plan.
-When implementation is complete, you MUST run validation (tests, manual checks) BEFORE calling clear_approval.sh. Unvalidated edits will be blocked.
-Then run: ~/.claude/scripts/clear_approval.sh — then tell the user to /accept or /reject. Do NOT make additional edits after signaling completion.
+After ALL edits are done (not after each edit): run the approved ## Objective Verification command, then record it with ~/.claude/scripts/record_validation.sh --command \"<approved verification command>\", then run ~/.claude/scripts/clear_approval.sh.
+If the objective cannot be verified, report objective unverified and stop. Do NOT tell the user to /accept unless objective verification has been recorded. Do NOT make additional edits after running clear_approval.sh.
 "
 
 if [[ -n "$CONTEXT" ]]; then

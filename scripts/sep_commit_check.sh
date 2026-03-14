@@ -21,7 +21,8 @@ if echo "$COMMAND" | grep -qE 'SEP-[0-9]+'; then
 fi
 
 deny_tool "BLOCKED: git commit must reference a SEP issue in the commit message.
-Include 'SEP-NNN' in your commit message (e.g., 'SEP-012: Add batch size config').
 
-NEXT ACTION: If no SEP exists, create one first:
-  ~/.claude/scripts/sep_create.sh \"title\" \"summary\" \"motivation\" \"change\" \"criteria\""
+NEXT ACTION (3 steps in order):
+1. Find your SEP number: ls ~/.claude/.sep/ or ls .sep/
+2. If none exists: ~/.claude/scripts/sep_create.sh 'title'
+3. Re-run git commit with SEP-NNN in the message (e.g., 'SEP-006: Fix error messages')."

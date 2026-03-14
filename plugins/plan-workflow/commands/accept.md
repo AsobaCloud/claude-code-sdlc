@@ -7,13 +7,14 @@ allowed-tools: Bash, Read, Write, Edit, Glob, Grep
 
 The user is accepting the completed implementation. Run the acceptance workflow:
 
-1. Run `git status` to check for uncommitted changes
-2. Read and display validation evidence:
-   a. Read the `validated` state file and `validation_log` from `~/.claude/state/{hash}/`
-      (use: `PROJECT_HASH=$(pwd | shasum | cut -c1-12); cat ~/.claude/state/$PROJECT_HASH/validated; cat ~/.claude/state/$PROJECT_HASH/validation_log`)
-   b. Read the plan's Success Criteria from state (or the plan file)
-   c. Present both to the user so they can judge whether the criteria were actually met
-3. If there are changes to commit:
+1. Run `~/.claude/scripts/accept_outcome.sh --preflight` before doing anything else.
+   If it blocks, stop there and relay the exact reason to the user. Do NOT commit and do NOT clear state.
+2. Run `git status` to check for uncommitted changes.
+3. Read and display validation evidence:
+   a. Read the `validated`, `objective_verified_evidence`, and `validation_log` state files from `~/.claude/state/{hash}/`
+   b. Read the plan's `## Success Criteria` and `## Objective Verification`
+   c. Present both so the user can see what proof exists for the accepted objective
+4. If there are changes to commit:
    a. Read the plan's objective from state (or the plan file) to determine the SEP reference
    b. If the project has no `.sep-exempt` file and no SEP exists, create one:
       - Source `~/.claude/scripts/sep_helpers.sh`
@@ -21,8 +22,8 @@ The user is accepting the completed implementation. Run the acceptance workflow:
    c. Stage relevant files (not .env or credentials) and commit with message: "SEP-NNN: <summary>"
    d. Update the SEP issue's Commits section with the commit hash
    e. If the project has a GitHub remote, comment on the GitHub issue with the commit reference
-4. Run `~/.claude/scripts/accept_outcome.sh` to clear approval state
-5. Summarize what was implemented and committed
-6. Confirm the acceptance to the user
+5. Run `~/.claude/scripts/accept_outcome.sh --finalize` to clear approval state
+6. Summarize what was implemented and committed
+7. Confirm the acceptance to the user
 
 Do NOT start any new work. Just confirm and stop.

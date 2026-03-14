@@ -9,6 +9,8 @@ state_remove approved
 state_remove objective
 state_remove scope
 state_remove criteria
+state_remove objective_verification
+state_remove objective_verification_required
 state_remove plan_file
 state_remove plan_hash
 state_remove planning_started_at
@@ -20,8 +22,20 @@ state_remove approval_token
 state_remove dirty
 state_remove validated
 state_remove validation_log
+state_remove validated_unit
+state_remove validated_e2e
 state_remove tests_failed
 state_remove tests_reviewed
+state_remove objective_verified
+state_remove objective_verified_hash
+state_remove objective_verified_edit_count
+state_remove objective_verified_evidence
+state_remove validate_pending
+state_remove validate_pending_hash
+state_remove accept_bypass_pending
+state_remove accept_bypass_pending_hash
+state_remove user_bypass
+state_remove user_bypass_hash
 
 # Enter planning mode
 state_write planning "1"

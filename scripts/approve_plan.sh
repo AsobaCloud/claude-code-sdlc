@@ -28,4 +28,4 @@ if approval_bundle_is_complete; then
 fi
 
 state_remove approved
-allow_with_context "Plan approval metadata is incomplete. Re-run ExitPlanMode to rebuild scope/objective/criteria before editing." "PostToolUse"
+allow_with_context "Plan approval metadata is incomplete. Tell the user to type /approve to force-rebuild metadata. Do NOT call ExitPlanMode again — it may cascade into quality check failures." "PostToolUse"

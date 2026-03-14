@@ -57,6 +57,7 @@ Every plan MUST include these enforced sections:
   - What is verified vs. assumed? State confidence explicitly.
   - What are the known gaps — what does the fix NOT cover?
   - For architecture changes: cite ≥2 external sources (NOT the codebase) to validate approach.
+- `## Objective Verification` — For code-change plans, the real end-to-end verification step that proves the approved objective works.
 
 The Scope section is enforced: edits to files not listed will be BLOCKED.
 
@@ -85,9 +86,6 @@ When a plan involves code changes, implementation MUST follow this order:
 - The marker is set by `PostToolUseFailure` on Bash when a test runner command fails.
 - Tests that pass immediately (fake tests) do NOT unlock production code editing.
 - The marker is cleared when two-tier validation completes or a new plan cycle starts.
-
-**Escape hatch for refactors (no new behavior):**
-`~/.claude/scripts/record_validation.sh --force "refactor: no new behavior"`
 
 ### Test Review Gate (human checkpoint)
 
@@ -162,16 +160,21 @@ session changes, context compaction, and new sessions — no session-scoped stat
 3. Write substantive plan to plan file (50+ words, all required sections)
 4. `ExitPlanMode` → validates plan quality → approved → editing unlocked
 5. Implement ONLY the changes described in the plan
-6. **Validate** — run tests or verification commands. Edits set a `dirty` flag; validation clears it.
-7. Run `~/.claude/scripts/clear_approval.sh` → blocked if `dirty` exists → locked. Tell user to `/accept` or `/reject`.
+6. **Validate** — run tests or verification commands. Edits set a `dirty` flag. For code-change plans, the approved `## Objective Verification` step must be recorded before the task can complete.
+7. Run `~/.claude/scripts/clear_approval.sh` → blocked if `dirty` exists or the current plan objective is unverified.
+8. Only after objective verification exists may you tell the user to `/accept` or `/reject`.
 
-### Validation State Markers (Two-Tier — SEP-005)
+### Validation State Markers
 
-- `dirty` — set automatically when a non-exempt file is edited; cleared only when BOTH validation tiers pass
+- `dirty` — set automatically when a non-exempt file is edited; cleared when two-tier validation completes or approved objective proof is recorded
 - `validated_unit` — set when a unit test command passes (cleared after both tiers complete)
 - `validated_e2e` — set when an E2E/integration test command passes (cleared after both tiers complete)
 - `validated` — records the last validation command that was run
 - `validation_log` — append-only log of all validation commands with timestamps
+- `objective_verification_required` — `1` when the current approved plan requires real end-to-end objective proof
+- `objective_verified` — timestamp showing the current plan objective was verified
+- `objective_verified_hash` — the `plan_hash` that the objective proof applies to
+- `objective_verified_evidence` — the exact approved verification command that proved the objective
 
 **Two-tier requirement:** Both a unit test AND an E2E/integration test must pass before the dirty flag clears. Running only one tier records progress but does NOT unlock completion.
 
@@ -183,9 +186,13 @@ Recognized **E2E/integration test** patterns (commands containing these keywords
 
 Examples: `npm run test:e2e`, `npx cypress run`, `npx playwright test`, `pytest --e2e`, `make test-integration`
 
-For non-standard validation (manual testing, curl, visual inspection):
-`~/.claude/scripts/record_validation.sh --force "description of what was validated"`
-Note: `--force` flag is required to confirm manual bypass of the two-tier requirement.
+To record approved objective proof:
+`~/.claude/scripts/record_validation.sh --command "exact approved verification command"`
+
+To record that manual user verification is pending:
+`~/.claude/scripts/record_validation.sh --manual "what the user must verify"`
+
+The agent may not bypass missing proof. Only the user may manually bypass by invoking `/accept`.
 
 ### Writes Allowed During Planning (no approval needed)
 
@@ -213,3 +220,4 @@ If approval is lost: user types `/approve` or runs `~/.claude/scripts/restore_ap
 - DO NOT make edits after running clear_approval.sh — you are locked out
 - DO NOT make edits beyond what the approved plan describes
 - DO NOT call clear_approval.sh without running validation first — it will be blocked
+- DO NOT tell the user to `/accept` unless the current plan objective has been verified
