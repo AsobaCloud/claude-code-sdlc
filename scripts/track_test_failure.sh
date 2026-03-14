@@ -23,8 +23,7 @@ fi
 if $IS_TEST; then
     state_write tests_failed "$(date -u +%Y-%m-%dT%H:%M:%SZ) $COMMAND"
     # Append to validation log
-    LOG_FILE=$(state_file validation_log)
-    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) FAILED: $COMMAND" >> "$LOG_FILE"
+    state_append validation_log "$(date -u +%Y-%m-%dT%H:%M:%SZ) FAILED: $COMMAND"
 fi
 
 exit 0

@@ -45,8 +45,7 @@ if ! $IS_UNIT && ! $IS_E2E; then
 fi
 
 # Append to validation log
-LOG_FILE=$(state_file validation_log)
-echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) $COMMAND" >> "$LOG_FILE"
+state_append validation_log "$(date -u +%Y-%m-%dT%H:%M:%SZ) $COMMAND"
 
 # Set tier markers
 if $IS_UNIT; then

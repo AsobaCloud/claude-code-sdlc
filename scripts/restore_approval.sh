@@ -8,14 +8,14 @@ init_persist_dir
 
 PLAN_FILE=$(resolve_plan_file_for_manual_approve)
 if [[ -z "$PLAN_FILE" || ! -f "$PLAN_FILE" ]]; then
-    rm -f "${PERSIST_DIR}/approved"
+    state_remove approved
     echo "Approval restore failed for project (hash: ${PROJECT_HASH})."
     echo "No readable plan file found. Create/update a plan in ~/.claude/plans then re-run /approve."
     exit 1
 fi
 
 if ! write_approval_bundle "$PLAN_FILE"; then
-    rm -f "${PERSIST_DIR}/approved"
+    state_remove approved
     echo "Approval restore failed for project (hash: ${PROJECT_HASH})."
     echo "Could not extract approval metadata from: ${PLAN_FILE}"
     exit 1

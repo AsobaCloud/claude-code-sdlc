@@ -26,7 +26,7 @@ objective_gate_satisfied() {
 }
 
 acceptance_needs_bypass() {
-    if [[ -f "${PERSIST_DIR}/dirty" ]]; then
+    if state_exists dirty; then
         return 0
     fi
 
@@ -40,12 +40,12 @@ acceptance_needs_bypass() {
 print_bypass_reasons() {
     local pending_note=""
     if validate_pending_for_current_plan; then
-        pending_note=$(cat "${PERSIST_DIR}/validate_pending")
+        pending_note=$(state_read validate_pending)
     fi
 
     echo "BLOCKED: Acceptance still requires a user bypass for the current plan."
-    if [[ -f "${PERSIST_DIR}/dirty" ]]; then
-        echo "Uncleared dirty state: $(cat "${PERSIST_DIR}/dirty")"
+    if state_exists dirty; then
+        echo "Uncleared dirty state: $(state_read dirty)"
     fi
     if ! objective_gate_satisfied; then
         echo "The approved plan objective has not been verified for the current plan."
@@ -57,21 +57,23 @@ print_bypass_reasons() {
 
 if [[ "$MODE" == "--preflight" ]]; then
     if ! acceptance_needs_bypass; then
-        rm -f "${PERSIST_DIR}/accept_bypass_pending" "${PERSIST_DIR}/accept_bypass_pending_hash"
+        state_remove accept_bypass_pending
+        state_remove accept_bypass_pending_hash
         echo "Acceptance preflight passed."
         exit 0
     fi
 
     if accept_bypass_pending_for_current_plan; then
-        echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "${PERSIST_DIR}/user_bypass"
-        echo "$PLAN_HASH" > "${PERSIST_DIR}/user_bypass_hash"
-        rm -f "${PERSIST_DIR}/accept_bypass_pending" "${PERSIST_DIR}/accept_bypass_pending_hash"
+        state_write user_bypass "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        state_write user_bypass_hash "$PLAN_HASH"
+        state_remove accept_bypass_pending
+        state_remove accept_bypass_pending_hash
         echo "USER BYPASS CONFIRMED: proceeding without objective verification for the current plan."
         exit 0
     fi
 
-    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "${PERSIST_DIR}/accept_bypass_pending"
-    echo "$PLAN_HASH" > "${PERSIST_DIR}/accept_bypass_pending_hash"
+    state_write accept_bypass_pending "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    state_write accept_bypass_pending_hash "$PLAN_HASH"
     print_bypass_reasons
     echo "If you personally verified the objective in the real system and want to bypass these remaining gates, run /accept again."
     exit 1
@@ -90,22 +92,26 @@ fi
 
 # Display validation evidence before clearing
 echo "── VALIDATION EVIDENCE ──"
-if [[ -f "${PERSIST_DIR}/validated" ]]; then
-    echo "Last validation: $(cat "${PERSIST_DIR}/validated")"
+VALIDATED_CONTENT=$(state_read validated)
+if [[ -n "$VALIDATED_CONTENT" ]]; then
+    echo "Last validation: $VALIDATED_CONTENT"
 else
     echo "Last validation: (none recorded)"
 fi
-if [[ -f "${PERSIST_DIR}/objective_verified_evidence" ]]; then
-    echo "Objective verification: $(cat "${PERSIST_DIR}/objective_verified_evidence")"
-elif [[ -f "${PERSIST_DIR}/user_bypass" ]]; then
-    echo "Objective verification: USER BYPASS ($(cat "${PERSIST_DIR}/user_bypass"))"
+OBJ_EVIDENCE=$(state_read objective_verified_evidence)
+USER_BYPASS_VAL=$(state_read user_bypass)
+if [[ -n "$OBJ_EVIDENCE" ]]; then
+    echo "Objective verification: $OBJ_EVIDENCE"
+elif [[ -n "$USER_BYPASS_VAL" ]]; then
+    echo "Objective verification: USER BYPASS ($USER_BYPASS_VAL)"
 else
     echo "Objective verification: (not recorded)"
 fi
-if [[ -f "${PERSIST_DIR}/validation_log" ]]; then
+VALIDATION_LOG=$(state_read validation_log)
+if [[ -n "$VALIDATION_LOG" ]]; then
     echo ""
     echo "Validation log:"
-    cat "${PERSIST_DIR}/validation_log"
+    echo "$VALIDATION_LOG"
 else
     echo "Validation log: (empty)"
 fi
@@ -114,12 +120,10 @@ echo "────────────────────────�
 # Extract SEP reference and objective from plan before clearing
 SEP_REF=""
 OBJECTIVE_TEXT=""
-if [[ -f "${PERSIST_DIR}/objective" ]]; then
-    SEP_REF=$(grep -oE 'SEP-[0-9]+' "${PERSIST_DIR}/objective" 2>/dev/null | head -1 || true)
-    OBJECTIVE_TEXT=$(cat "${PERSIST_DIR}/objective" 2>/dev/null | head -1 || true)
-    if [[ -n "$SEP_REF" ]]; then
-        echo "$SEP_REF" > "${PERSIST_DIR}/last_sep_ref"
-    fi
+OBJECTIVE_CONTENT=$(state_read objective)
+if [[ -n "$OBJECTIVE_CONTENT" ]]; then
+    SEP_REF=$(echo "$OBJECTIVE_CONTENT" | grep -oE 'SEP-[0-9]+' 2>/dev/null | head -1 || true)
+    OBJECTIVE_TEXT=$(echo "$OBJECTIVE_CONTENT" | head -1)
 fi
 
 # ── Auto-update memory with completion record ──
@@ -173,8 +177,9 @@ if [[ -n "$MEMORY_DIR" && -f "${MEMORY_DIR}/MEMORY.md" ]]; then
 fi
 
 # ── Mark plan file as completed ──
-if [[ -f "${PERSIST_DIR}/plan_file" ]]; then
-    PLAN_FILE=$(cat "${PERSIST_DIR}/plan_file" | tr -d '\r' | sed 's/^"//;s/"$//')
+PLAN_FILE_PATH=$(state_read plan_file)
+if [[ -n "$PLAN_FILE_PATH" ]]; then
+    PLAN_FILE=$(echo "$PLAN_FILE_PATH" | tr -d '\r' | sed 's/^"//;s/"$//')
     if [[ -n "$PLAN_FILE" && -f "$PLAN_FILE" ]]; then
         if ! head -3 "$PLAN_FILE" | grep -q '^\*\*Status: DONE\*\*'; then
             {
@@ -187,35 +192,18 @@ if [[ -f "${PERSIST_DIR}/plan_file" ]]; then
     fi
 fi
 
-# Clear project state
-rm -f \
-    "${PERSIST_DIR}/approved" \
-    "${PERSIST_DIR}/objective" \
-    "${PERSIST_DIR}/scope" \
-    "${PERSIST_DIR}/criteria" \
-    "${PERSIST_DIR}/objective_verification" \
-    "${PERSIST_DIR}/objective_verification_required" \
-    "${PERSIST_DIR}/plan_file" \
-    "${PERSIST_DIR}/plan_hash" \
-    "${PERSIST_DIR}/planning" \
-    "${PERSIST_DIR}/planning_started_at" \
-    "${PERSIST_DIR}/diagnostic_mode" \
-    "${PERSIST_DIR}/dirty" \
-    "${PERSIST_DIR}/validated" \
-    "${PERSIST_DIR}/validation_log" \
-    "${PERSIST_DIR}/validated_unit" \
-    "${PERSIST_DIR}/validated_e2e" \
-    "${PERSIST_DIR}/tests_failed" \
-    "${PERSIST_DIR}/tests_reviewed" \
-    "${PERSIST_DIR}/objective_verified" \
-    "${PERSIST_DIR}/objective_verified_hash" \
-    "${PERSIST_DIR}/objective_verified_edit_count" \
-    "${PERSIST_DIR}/objective_verified_evidence" \
-    "${PERSIST_DIR}/validate_pending" \
-    "${PERSIST_DIR}/validate_pending_hash" \
-    "${PERSIST_DIR}/accept_bypass_pending" \
-    "${PERSIST_DIR}/accept_bypass_pending_hash" \
-    "${PERSIST_DIR}/user_bypass" \
-    "${PERSIST_DIR}/user_bypass_hash"
+# Save last_sep_ref before clearing (survives plan cycles)
+LAST_SEP_REF=""
+if [[ -n "$SEP_REF" ]]; then
+    LAST_SEP_REF="$SEP_REF"
+fi
+
+# Clear all conversation state
+clear_all_state
+
+# Restore last_sep_ref (persists across plan cycles)
+if [[ -n "$LAST_SEP_REF" ]]; then
+    state_write last_sep_ref "$LAST_SEP_REF"
+fi
 
 echo "Implementation accepted. Plan approval cleared. Ready for next task."

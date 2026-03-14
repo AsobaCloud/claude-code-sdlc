@@ -84,58 +84,119 @@ COMPLETED
 
 ## 3. State Storage Contract
 
-### Directory structure
+### Dual-mode backend (SEP-010)
 
+State storage uses a dual-mode backend in `common.sh`:
+
+- **Test mode** (`CLAUDE_TEST_PERSIST_DIR` set): Flat files in temp directory — preserves backward compatibility with the entire test suite.
+- **Production mode**: SQLite database at `~/.claude/workflow.db` — eliminates path assembly bugs, silent failures, and non-atomic writes.
+
+The `state_read()`/`state_write()`/`state_exists()`/`state_remove()` API is identical in both modes. Scripts use these functions exclusively.
+
+### SQLite schema (`~/.claude/workflow.db`)
+
+```sql
+PRAGMA journal_mode=WAL;
+
+CREATE TABLE conversations (
+    id              TEXT PRIMARY KEY,     -- conversation token (hex)
+    project_dir     TEXT NOT NULL,        -- absolute path to project
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    last_active     TEXT NOT NULL DEFAULT (datetime('now')),
+    phase           TEXT NOT NULL DEFAULT 'idle'
+);
+
+CREATE TABLE sessions (
+    session_id      TEXT PRIMARY KEY,     -- from Claude Code hook JSON
+    conversation_id TEXT NOT NULL REFERENCES conversations(id),
+    started_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE state (
+    conversation_id TEXT NOT NULL,
+    key             TEXT NOT NULL,        -- same keys as the old flat files
+    value           TEXT,
+    updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (conversation_id, key)
+);
+
+CREATE TABLE events (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    conversation_id TEXT NOT NULL,
+    session_id      TEXT,
+    timestamp       TEXT NOT NULL DEFAULT (datetime('now')),
+    event_type      TEXT NOT NULL,
+    detail          TEXT
+);
 ```
-~/.claude/state/{PROJECT_HASH}/{CONVERSATION_TOKEN}/
-  ├── approved                        # "1" when plan is approved
-  ├── plan_file                       # absolute path to approved plan
-  ├── plan_hash                       # SHA256 of plan at approval time
-  ├── objective                       # extracted from ## Objective
-  ├── scope                           # newline-separated absolute paths
-  ├── criteria                        # extracted from ## Success Criteria
-  ├── objective_verification          # extracted from ## Objective Verification
-  ├── objective_verification_required # "0" or "1"
-  ├── planning                        # "1" during plan mode
-  ├── planning_started_at             # epoch seconds
-  ├── edit_count                      # decimal counter
-  ├── dirty                           # "timestamp path" when unvalidated edits exist
-  ├── validated                       # last validation command
-  ├── validation_log                  # append-only log of all validations
-  ├── validated_unit                  # unit test command that passed
-  ├── validated_e2e                   # E2E test command that passed
-  ├── tests_failed                    # "timestamp command" (red phase marker)
-  ├── tests_reviewed                  # set by /approve-tests
-  ├── objective_verified              # ISO8601 timestamp
-  ├── objective_verified_hash         # plan hash at verification time
-  ├── objective_verified_edit_count   # edit count at verification time
-  ├── objective_verified_evidence     # exact verification command
-  ├── diagnostic_mode                 # "1" during investigation mode
-  ├── validate_pending                # manual verification description
-  ├── validate_pending_hash           # plan hash when pending set
-  ├── accept_bypass_pending           # "1" when /accept blocked, awaiting retry
-  ├── accept_bypass_pending_hash      # plan hash when bypass pending
-  ├── user_bypass                     # ISO8601 when user confirmed bypass
-  └── user_bypass_hash                # plan hash when bypass confirmed
-```
+
+### State keys (same in both modes)
+
+| Key | Value | Description |
+|---|---|---|
+| `approved` | `"1"` | Plan is approved |
+| `plan_file` | absolute path | Approved plan file |
+| `plan_hash` | SHA256 hex | Plan hash at approval time |
+| `objective` | text | Extracted from ## Objective |
+| `scope` | newline-separated paths | Extracted from ## Scope |
+| `criteria` | text | Extracted from ## Success Criteria |
+| `objective_verification` | text | Extracted from ## Objective Verification |
+| `objective_verification_required` | `"0"` or `"1"` | Whether plan requires verification |
+| `planning` | `"1"` | Plan mode active |
+| `planning_started_at` | epoch seconds | When plan mode entered |
+| `edit_count` | decimal | Counter incremented per edit |
+| `dirty` | `"timestamp path"` | Unvalidated edits exist |
+| `validated` | command | Last validation command |
+| `validation_log` | multi-line | Append-only validation log |
+| `validated_unit` | command | Unit test that passed |
+| `validated_e2e` | command | E2E test that passed |
+| `tests_failed` | `"timestamp command"` | Red phase marker |
+| `tests_reviewed` | timestamp | Set by /approve-tests |
+| `objective_verified` | ISO8601 | Verification timestamp |
+| `objective_verified_hash` | plan hash | Hash at verification time |
+| `objective_verified_edit_count` | decimal | Edit count at verification time |
+| `objective_verified_evidence` | command | Exact verification command |
+| `diagnostic_mode` | `"1"` | Investigation mode active |
+| `validate_pending` | description | Manual verification pending |
+| `validate_pending_hash` | plan hash | Hash when pending set |
+| `accept_bypass_pending` | timestamp | /accept blocked, awaiting retry |
+| `accept_bypass_pending_hash` | plan hash | Hash when bypass pending |
+| `user_bypass` | ISO8601 | User confirmed bypass |
+| `user_bypass_hash` | plan hash | Hash when bypass confirmed |
 
 ### Invariants
 
-1. **Conversation isolation:** State written by conversation A MUST NOT be visible to conversation B. Enforced by including the conversation token in the PERSIST_DIR path.
-2. **Test override:** `CLAUDE_TEST_PERSIST_DIR` overrides the entire path computation (no token appended). This preserves backward compatibility with the test harness.
-3. **Single source of truth:** All state access MUST go through `init_persist_dir()` → `state_read()`/`state_write()`. No script may compute PERSIST_DIR inline.
+1. **Conversation isolation:** State written by conversation A MUST NOT be visible to conversation B. In production: enforced by `conversation_id` column. In test: enforced by `CLAUDE_TEST_PERSIST_DIR`.
+2. **Test override:** `CLAUDE_TEST_PERSIST_DIR` forces flat-file mode — the entire SQLite path is bypassed. All existing tests pass unchanged.
+3. **Single source of truth:** All state access MUST go through `state_read()`/`state_write()`. No script may use raw `${PERSIST_DIR}/filename` paths.
 4. **Atomic approval:** `write_approval_bundle()` clears `approved` first, writes all metadata, then sets `approved` last — preventing partial state.
+5. **Bulk cleanup:** `clear_all_state()` replaces individual `rm -f` lists. In SQLite mode this is a single `DELETE FROM state` — atomic and complete.
 
-### PROJECT_HASH
+### Conversation identity resolution (`init_persist_dir`)
 
-Computed as: `pwd | shasum | cut -c1-12`
+Production mode resolves `CONV_ID` with priority:
+
+1. `SESSION_ID` (from hook JSON) → look up `sessions` table
+2. `CONVERSATION_TOKEN` env var → look up `conversations` table
+3. MEMORY.md token → look up `conversations` table
+4. Most recent active conversation for `project_dir`
+5. Create new conversation (random hex token)
+
+After resolution, the session is registered in `sessions` and `last_active` is updated.
 
 ### CONVERSATION_TOKEN
 
 - Generated via `openssl rand -hex 8`
+- Used as `conversations.id` in SQLite (production mode)
 - Stored in MEMORY.md under `## Conversation Token` (survives compaction)
 - Read by `read_conversation_token()` in `common.sh`
-- When absent, PERSIST_DIR uses `no-token` subdirectory (hooks function but no approval is found — correct behavior for a conversation that hasn't run `/new-token`)
+
+### Additional state functions (SEP-010)
+
+- `state_append(key, value)` — appends to existing value with newline separator (for `validation_log`)
+- `clear_all_state()` — removes all state for the current conversation (replaces bulk `rm -f` lists)
+- `counter_increment(key)` — atomic increment in SQLite mode via `ON CONFLICT DO UPDATE`
+- `log_event(type, detail)` — records events in the `events` table (production only)
 
 ---
 
@@ -204,17 +265,18 @@ Completed plans may be archived or deleted. No plan file persists indefinitely.
 
 ### What is per-conversation (isolated)
 
-- PERSIST_DIR (`~/.claude/state/{PROJECT_HASH}/{TOKEN}/`)
+- State rows in `~/.claude/workflow.db` keyed by `conversation_id` (production)
+- PERSIST_DIR flat files (test mode only)
 - Plan files directory (`~/.claude/plans/{TOKEN}/`)
 - All approval state, validation state, edit count, dirty flags
 
 ### What is per-conversation (single-slot, last-writer-wins)
 
-- MEMORY.md conversation token — each project directory supports one active conversation token in MEMORY.md at a time. When a new conversation generates a token, the previous token is overwritten. The previous conversation's PERSIST_DIR remains on disk but becomes unreachable via MEMORY.md.
+- MEMORY.md conversation token — each project directory supports one active conversation token in MEMORY.md at a time. When a new conversation generates a token, the previous token is overwritten. In production mode, the `sessions` table provides authoritative session → conversation mapping, making MEMORY.md a backup for compaction recovery only.
 
-### Token resolution in `init_persist_dir()`
+### Token resolution in `init_persist_dir()` (production mode)
 
-`CONVERSATION_TOKEN` is set with priority: `SESSION_ID` (from hook JSON) > `CONVERSATION_TOKEN` env var > `read_conversation_token()` from MEMORY.md > `no-token`. Using `SESSION_ID` as the primary source eliminates the MEMORY.md single-slot collision for all hook-based flows.
+Resolution priority: `SESSION_ID` → `sessions` table lookup > `CONVERSATION_TOKEN` env var → `conversations` table > MEMORY.md token → `conversations` table > most recent active conversation for project > create new conversation. Using `sessions` table lookup as the primary source eliminates the MEMORY.md single-slot collision for all hook-based flows.
 
 ### Invariants
 
@@ -404,6 +466,9 @@ Items where the code does not yet match this contract:
 | `newest_plan_file()` scoped to conversation | Scans only `conversation_plan_dir()` | SEP-004 ✅ |
 | `SESSION_ID` as primary token source | `init_persist_dir()` prefers SESSION_ID from hook JSON | SEP-004 ✅ |
 | Dead `approval_token` writes removed | Cleaned from `approve_plan.sh`, `validate_plan_quality.sh`, `clear_plan_on_new_task.sh` | SEP-004 ✅ |
-| Automatic token generation on conversation start | Requires explicit `/new-token` | Needs SEP |
+| SQLite state backend | Dual-mode: SQLite in production, flat files in test | SEP-010 ✅ |
+| `state_append` / `clear_all_state` | Implemented in `common.sh` | SEP-010 ✅ |
+| Conversation identity via `sessions` table | SESSION_ID → conversation lookup in SQLite | SEP-010 ✅ |
+| Stale conversation cleanup | `cleanup_stale_sessions.sh` deletes conversations inactive 7+ days | SEP-010 ✅ |
 | Orphaned plan file cleanup | 119+ orphaned plans, no cleanup mechanism | Needs design |
 | `PreCompact` hook for state snapshot | Not used | Optional enhancement |

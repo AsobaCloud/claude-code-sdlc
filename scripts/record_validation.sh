@@ -52,7 +52,6 @@ DESCRIPTION="${DESCRIPTION:-}"
 PLAN_HASH=$(current_plan_hash)
 EDIT_COUNT=$(current_edit_count)
 OBJECTIVE_VERIFICATION=$(state_read objective_verification)
-LOG_FILE="${PERSIST_DIR}/validation_log"
 
 if [[ -z "$MODE" ]]; then
     echo "BLOCKED: record_validation.sh requires a flag."
@@ -74,7 +73,8 @@ if [[ "$MODE" == "command" ]]; then
         exit 1
     fi
 
-    if [[ ! -f "$LOG_FILE" ]] || ! grep -Fq "$DESCRIPTION" "$LOG_FILE"; then
+    LOG_CONTENT=$(state_read validation_log)
+    if [[ -z "$LOG_CONTENT" ]] || ! echo "$LOG_CONTENT" | grep -Fq "$DESCRIPTION"; then
         echo "BLOCKED: Command '$DESCRIPTION' not found in validation_log."
         echo "Run the command first via Bash, then call record_validation.sh --command."
         exit 1
@@ -87,17 +87,20 @@ if [[ "$MODE" == "command" ]]; then
         fi
     fi
 
-    rm -f "${PERSIST_DIR}/dirty"
-    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "${PERSIST_DIR}/objective_verified"
-    echo "$PLAN_HASH" > "${PERSIST_DIR}/objective_verified_hash"
-    echo "$EDIT_COUNT" > "${PERSIST_DIR}/objective_verified_edit_count"
-    echo "$DESCRIPTION" > "${PERSIST_DIR}/objective_verified_evidence"
-    echo "[OBJECTIVE VERIFIED] $DESCRIPTION" > "${PERSIST_DIR}/validated"
-    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) [OBJECTIVE VERIFIED] $DESCRIPTION" >> "$LOG_FILE"
+    state_remove dirty
+    state_write objective_verified "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    state_write objective_verified_hash "$PLAN_HASH"
+    state_write objective_verified_edit_count "$EDIT_COUNT"
+    state_write objective_verified_evidence "$DESCRIPTION"
+    state_write validated "[OBJECTIVE VERIFIED] $DESCRIPTION"
+    state_append validation_log "$(date -u +%Y-%m-%dT%H:%M:%SZ) [OBJECTIVE VERIFIED] $DESCRIPTION"
 
-    rm -f "${PERSIST_DIR}/validate_pending" "${PERSIST_DIR}/validate_pending_hash"
-    rm -f "${PERSIST_DIR}/accept_bypass_pending" "${PERSIST_DIR}/accept_bypass_pending_hash"
-    rm -f "${PERSIST_DIR}/user_bypass" "${PERSIST_DIR}/user_bypass_hash"
+    state_remove validate_pending
+    state_remove validate_pending_hash
+    state_remove accept_bypass_pending
+    state_remove accept_bypass_pending_hash
+    state_remove user_bypass
+    state_remove user_bypass_hash
 
     echo "Objective verification recorded for current plan: ${DESCRIPTION}. Dirty flag cleared."
     exit 0
@@ -109,9 +112,9 @@ if [[ "$MODE" == "manual" ]]; then
         exit 1
     fi
 
-    echo "[MANUAL PENDING] $DESCRIPTION" > "${PERSIST_DIR}/validate_pending"
-    echo "$PLAN_HASH" > "${PERSIST_DIR}/validate_pending_hash"
-    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) [MANUAL PENDING] $DESCRIPTION" >> "$LOG_FILE"
+    state_write validate_pending "[MANUAL PENDING] $DESCRIPTION"
+    state_write validate_pending_hash "$PLAN_HASH"
+    state_append validation_log "$(date -u +%Y-%m-%dT%H:%M:%SZ) [MANUAL PENDING] $DESCRIPTION"
     echo "Manual objective verification pending: ${DESCRIPTION}."
     echo "This does not complete the task. Only the user may manually bypass by invoking /accept after reviewing the missing proof."
     exit 0
