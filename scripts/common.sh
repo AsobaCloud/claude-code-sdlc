@@ -2,12 +2,13 @@
 # common.sh — shared library for all Claude hook scripts
 # Source this at the top of every hook: source "$(dirname "$0")/common.sh"
 #
-# Architecture: Dual-mode state backend (SEP-010).
-# - Test mode (CLAUDE_TEST_PERSIST_DIR set): flat files in temp directory
-# - Production mode: SQLite database at ~/.claude/workflow.db
+# Architecture: SQLite state backend (SEP-010, SEP-006).
+# All state is stored in a SQLite database at ~/.claude/workflow.db.
+# Tests override HOME to use a temporary database.
 #
-# The state_read/state_write/state_exists/state_remove API is identical
-# in both modes. Scripts should use these functions exclusively.
+# The state_read/state_write/state_exists/state_remove API provides
+# conversation-scoped key-value storage. Scripts should use these
+# functions exclusively.
 
 # ── Require jq ──
 if ! command -v jq &>/dev/null; then
@@ -15,10 +16,7 @@ if ! command -v jq &>/dev/null; then
     exit 1
 fi
 
-# ── Mode detection ──
-_is_test_mode() { [[ -n "${CLAUDE_TEST_PERSIST_DIR:-}" ]]; }
-
-# ── SQLite helpers (production only) ──
+# ── SQLite helpers ──
 WORKFLOW_DB="${HOME}/.claude/workflow.db"
 
 sql_escape() {
@@ -78,56 +76,50 @@ SQL
 }
 
 # ── init_persist_dir: set up state backend ──
-# Test mode: flat files in CLAUDE_TEST_PERSIST_DIR (unchanged)
-# Production: SQLite conversation lookup/creation
-# Sets: PROJECT_HASH, PERSIST_DIR, CONVERSATION_TOKEN, CONV_ID (production only)
+# SQLite conversation lookup/creation.
+# If CONV_ID is already set (e.g. by test harness), skips identity resolution.
+# Sets: PROJECT_HASH, PERSIST_DIR, CONVERSATION_TOKEN, CONV_ID
 init_persist_dir() {
-    if _is_test_mode; then
-        PROJECT_HASH="test"
-        PERSIST_DIR="$CLAUDE_TEST_PERSIST_DIR"
-        CONVERSATION_TOKEN="${CONVERSATION_TOKEN:-}"
-        mkdir -p "$PERSIST_DIR"
-        mkdir -p "$(conversation_plan_dir)"
-        return
-    fi
-
-    # Production: SQLite-backed
     ensure_db
     PROJECT_HASH=$(pwd | shasum | cut -c1-12)
-    CONV_ID=""
 
-    # 1) SESSION_ID → sessions table lookup
-    if [[ -n "${SESSION_ID:-}" ]]; then
-        CONV_ID=$(db_query "SELECT conversation_id FROM sessions WHERE session_id='$(sql_escape "$SESSION_ID")';")
-        # If session not found, use SESSION_ID as the conversation identity
+    if [[ -z "${CONV_ID:-}" ]]; then
+        # 1) SESSION_ID → sessions table lookup
+        if [[ -n "${SESSION_ID:-}" ]]; then
+            CONV_ID=$(db_query "SELECT conversation_id FROM sessions WHERE session_id='$(sql_escape "$SESSION_ID")';")
+            # If session not found, use SESSION_ID as the conversation identity
+            if [[ -z "$CONV_ID" ]]; then
+                CONV_ID="$SESSION_ID"
+                db_exec "INSERT OR IGNORE INTO conversations (id, project_dir) VALUES ('$(sql_escape "$CONV_ID")', '$(sql_escape "$(pwd)")');"
+                db_exec "INSERT OR IGNORE INTO sessions (session_id, conversation_id) VALUES ('$(sql_escape "$SESSION_ID")', '$(sql_escape "$CONV_ID")');"
+            fi
+        fi
+
+        # 2) CONVERSATION_TOKEN env or MEMORY.md → use as conversation ID
         if [[ -z "$CONV_ID" ]]; then
-            CONV_ID="$SESSION_ID"
+            local token="${CONVERSATION_TOKEN:-}"
+            if [[ -z "$token" ]]; then
+                token=$(read_conversation_token 2>/dev/null) || true
+            fi
+            if [[ -n "$token" ]]; then
+                db_exec "INSERT OR IGNORE INTO conversations (id, project_dir) VALUES ('$(sql_escape "$token")', '$(sql_escape "$(pwd)")');"
+                CONV_ID="$token"
+            fi
+        fi
+
+        # 3) No token available → use "no-token" fallback
+        if [[ -z "$CONV_ID" ]]; then
+            CONV_ID="no-token"
             db_exec "INSERT OR IGNORE INTO conversations (id, project_dir) VALUES ('$(sql_escape "$CONV_ID")', '$(sql_escape "$(pwd)")');"
+        fi
+
+        # Register session → conversation mapping (if not done above)
+        if [[ -n "${SESSION_ID:-}" ]]; then
             db_exec "INSERT OR IGNORE INTO sessions (session_id, conversation_id) VALUES ('$(sql_escape "$SESSION_ID")', '$(sql_escape "$CONV_ID")');"
         fi
-    fi
-
-    # 2) CONVERSATION_TOKEN env or MEMORY.md → use as conversation ID
-    if [[ -z "$CONV_ID" ]]; then
-        local token="${CONVERSATION_TOKEN:-}"
-        if [[ -z "$token" ]]; then
-            token=$(read_conversation_token 2>/dev/null) || true
-        fi
-        if [[ -n "$token" ]]; then
-            db_exec "INSERT OR IGNORE INTO conversations (id, project_dir) VALUES ('$(sql_escape "$token")', '$(sql_escape "$(pwd)")');"
-            CONV_ID="$token"
-        fi
-    fi
-
-    # 3) No token available → use "no-token" fallback
-    if [[ -z "$CONV_ID" ]]; then
-        CONV_ID="no-token"
+    else
+        # CONV_ID pre-set — ensure conversation exists in DB
         db_exec "INSERT OR IGNORE INTO conversations (id, project_dir) VALUES ('$(sql_escape "$CONV_ID")', '$(sql_escape "$(pwd)")');"
-    fi
-
-    # Register session → conversation mapping (if not done above)
-    if [[ -n "${SESSION_ID:-}" ]]; then
-        db_exec "INSERT OR IGNORE INTO sessions (session_id, conversation_id) VALUES ('$(sql_escape "$SESSION_ID")', '$(sql_escape "$CONV_ID")');"
     fi
 
     # Update activity timestamp
@@ -142,9 +134,7 @@ init_persist_dir() {
 
 # ── Conversation-scoped plan directory ──
 conversation_plan_dir() {
-    if [[ -n "${CLAUDE_TEST_PERSIST_DIR:-}" ]]; then
-        echo "${HOME}/.claude/plans"
-    elif [[ -n "${CONVERSATION_TOKEN:-}" && "${CONVERSATION_TOKEN}" != "no-token" ]]; then
+    if [[ -n "${CONVERSATION_TOKEN:-}" && "${CONVERSATION_TOKEN}" != "no-token" ]]; then
         echo "${HOME}/.claude/plans/${CONVERSATION_TOKEN}"
     else
         echo "${HOME}/.claude/plans"
@@ -152,13 +142,13 @@ conversation_plan_dir() {
 }
 
 # ── init_hook: read stdin, set up state backend ──
-# Sets: HOOK_INPUT, SESSION_ID, PROJECT_HASH, PERSIST_DIR, CONV_ID (production)
+# Sets: HOOK_INPUT, SESSION_ID, PROJECT_HASH, PERSIST_DIR, CONV_ID
 init_hook() {
     HOOK_INPUT=$(cat)
 
     SESSION_ID=$(echo "$HOOK_INPUT" | jq -r '.session_id // empty' 2>/dev/null)
 
-    if [[ -z "$SESSION_ID" && -z "$CLAUDE_TEST_PERSIST_DIR" ]]; then
+    if [[ -z "$SESSION_ID" && -z "${CONV_ID:-}" ]]; then
         echo '{"error":"BLOCKED: Hook system cannot verify session. SESSION_ID missing from hook input. Tool call denied (fail-closed)."}' >&2
         exit 1
     fi
@@ -166,119 +156,53 @@ init_hook() {
     init_persist_dir
 }
 
-# ── State helpers (dual-mode: flat files in test, SQLite in production) ──
+# ── State helpers (SQLite-backed) ──
 state_file() {
     echo "${PERSIST_DIR}/$1"
 }
 
 state_exists() {
-    if _is_test_mode; then
-        [[ -f "${PERSIST_DIR}/$1" ]]
-    else
-        local count
-        count=$(db_query "SELECT COUNT(*) FROM state WHERE conversation_id='$(sql_escape "$CONV_ID")' AND key='$(sql_escape "$1")' AND value IS NOT NULL;")
-        [[ "$count" -gt 0 ]]
-    fi
+    local count
+    count=$(db_query "SELECT COUNT(*) FROM state WHERE conversation_id='$(sql_escape "$CONV_ID")' AND key='$(sql_escape "$1")' AND value IS NOT NULL;")
+    [[ "$count" -gt 0 ]]
 }
 
 state_write() {
-    if _is_test_mode; then
-        echo "$2" > "${PERSIST_DIR}/$1"
-    else
-        db_exec "INSERT OR REPLACE INTO state (conversation_id, key, value, updated_at) VALUES ('$(sql_escape "$CONV_ID")', '$(sql_escape "$1")', '$(sql_escape "$2")', datetime('now'));"
-    fi
+    db_exec "INSERT OR REPLACE INTO state (conversation_id, key, value, updated_at) VALUES ('$(sql_escape "$CONV_ID")', '$(sql_escape "$1")', '$(sql_escape "$2")', datetime('now'));"
 }
 
 state_read() {
-    if _is_test_mode; then
-        cat "${PERSIST_DIR}/$1" 2>/dev/null || true
-    else
-        db_query "SELECT value FROM state WHERE conversation_id='$(sql_escape "$CONV_ID")' AND key='$(sql_escape "$1")';"
-    fi
+    db_query "SELECT value FROM state WHERE conversation_id='$(sql_escape "$CONV_ID")' AND key='$(sql_escape "$1")';"
 }
 
 state_remove() {
-    if _is_test_mode; then
-        rm -f "${PERSIST_DIR}/$1"
-    else
-        db_exec "DELETE FROM state WHERE conversation_id='$(sql_escape "$CONV_ID")' AND key='$(sql_escape "$1")';"
-    fi
+    db_exec "DELETE FROM state WHERE conversation_id='$(sql_escape "$CONV_ID")' AND key='$(sql_escape "$1")';"
 }
 
 state_append() {
     local key="$1" value="$2"
-    if _is_test_mode; then
-        echo "$value" >> "${PERSIST_DIR}/$key"
+    local existing
+    existing=$(db_query "SELECT COUNT(*) FROM state WHERE conversation_id='$(sql_escape "$CONV_ID")' AND key='$(sql_escape "$key")';")
+    if [[ "$existing" -gt 0 ]]; then
+        db_exec "UPDATE state SET value = value || char(10) || '$(sql_escape "$value")', updated_at = datetime('now') WHERE conversation_id='$(sql_escape "$CONV_ID")' AND key='$(sql_escape "$key")';"
     else
-        local existing
-        existing=$(db_query "SELECT COUNT(*) FROM state WHERE conversation_id='$(sql_escape "$CONV_ID")' AND key='$(sql_escape "$key")';")
-        if [[ "$existing" -gt 0 ]]; then
-            db_exec "UPDATE state SET value = value || char(10) || '$(sql_escape "$value")', updated_at = datetime('now') WHERE conversation_id='$(sql_escape "$CONV_ID")' AND key='$(sql_escape "$key")';"
-        else
-            state_write "$key" "$value"
-        fi
+        state_write "$key" "$value"
     fi
 }
 
 clear_all_state() {
-    if _is_test_mode; then
-        rm -f \
-            "${PERSIST_DIR}/approved" \
-            "${PERSIST_DIR}/objective" \
-            "${PERSIST_DIR}/scope" \
-            "${PERSIST_DIR}/criteria" \
-            "${PERSIST_DIR}/objective_verification" \
-            "${PERSIST_DIR}/objective_verification_required" \
-            "${PERSIST_DIR}/plan_file" \
-            "${PERSIST_DIR}/plan_hash" \
-            "${PERSIST_DIR}/planning" \
-            "${PERSIST_DIR}/planning_started_at" \
-            "${PERSIST_DIR}/diagnostic_mode" \
-            "${PERSIST_DIR}/dirty" \
-            "${PERSIST_DIR}/validated" \
-            "${PERSIST_DIR}/validation_log" \
-            "${PERSIST_DIR}/validated_unit" \
-            "${PERSIST_DIR}/validated_e2e" \
-            "${PERSIST_DIR}/tests_failed" \
-            "${PERSIST_DIR}/tests_reviewed" \
-            "${PERSIST_DIR}/objective_verified" \
-            "${PERSIST_DIR}/objective_verified_hash" \
-            "${PERSIST_DIR}/objective_verified_edit_count" \
-            "${PERSIST_DIR}/objective_verified_evidence" \
-            "${PERSIST_DIR}/validate_pending" \
-            "${PERSIST_DIR}/validate_pending_hash" \
-            "${PERSIST_DIR}/accept_bypass_pending" \
-            "${PERSIST_DIR}/accept_bypass_pending_hash" \
-            "${PERSIST_DIR}/user_bypass" \
-            "${PERSIST_DIR}/user_bypass_hash" \
-            "${PERSIST_DIR}/edit_count"
-    else
-        db_exec "DELETE FROM state WHERE conversation_id='$(sql_escape "$CONV_ID")';"
-    fi
+    db_exec "DELETE FROM state WHERE conversation_id='$(sql_escape "$CONV_ID")';"
 }
 
 counter_increment() {
     local key="$1"
-    if _is_test_mode; then
-        local value=0
-        if state_exists "$key"; then
-            value=$(state_read "$key")
-        fi
-        [[ "$value" =~ ^[0-9]+$ ]] || value=0
-        value=$(( value + 1 ))
-        state_write "$key" "$value"
-        echo "$value"
-    else
-        db_exec "INSERT INTO state (conversation_id, key, value, updated_at) VALUES ('$(sql_escape "$CONV_ID")', '$(sql_escape "$key")', '1', datetime('now')) ON CONFLICT(conversation_id, key) DO UPDATE SET value = CAST(COALESCE(NULLIF(value, ''), '0') AS INTEGER) + 1, updated_at = datetime('now');"
-        db_query "SELECT value FROM state WHERE conversation_id='$(sql_escape "$CONV_ID")' AND key='$(sql_escape "$key")';"
-    fi
+    db_exec "INSERT INTO state (conversation_id, key, value, updated_at) VALUES ('$(sql_escape "$CONV_ID")', '$(sql_escape "$key")', '1', datetime('now')) ON CONFLICT(conversation_id, key) DO UPDATE SET value = CAST(COALESCE(NULLIF(value, ''), '0') AS INTEGER) + 1, updated_at = datetime('now');"
+    db_query "SELECT value FROM state WHERE conversation_id='$(sql_escape "$CONV_ID")' AND key='$(sql_escape "$key")';"
 }
 
 log_event() {
     local event_type="$1" detail="${2:-}"
-    if ! _is_test_mode; then
-        db_exec "INSERT INTO events (conversation_id, session_id, event_type, detail) VALUES ('$(sql_escape "${CONV_ID:-}")', '$(sql_escape "${SESSION_ID:-}")', '$(sql_escape "$event_type")', '$(sql_escape "$detail")');"
-    fi
+    db_exec "INSERT INTO events (conversation_id, session_id, event_type, detail) VALUES ('$(sql_escape "${CONV_ID:-}")', '$(sql_escape "${SESSION_ID:-}")', '$(sql_escape "$event_type")', '$(sql_escape "$detail")');"
 }
 
 # Legacy aliases — scripts that call persist_* still work
@@ -663,11 +587,9 @@ generate_conversation_token() {
     local token mem_file mem_dir
     token=$(openssl rand -hex 8)
 
-    # In production mode, also register as a conversation in SQLite
-    if ! _is_test_mode; then
-        ensure_db
-        db_exec "INSERT OR IGNORE INTO conversations (id, project_dir) VALUES ('$(sql_escape "$token")', '$(sql_escape "$(pwd)")');"
-    fi
+    # Register as a conversation in SQLite
+    ensure_db
+    db_exec "INSERT OR IGNORE INTO conversations (id, project_dir) VALUES ('$(sql_escape "$token")', '$(sql_escape "$(pwd)")');"
 
     # Write to MEMORY.md so it survives compaction
     mem_file=$(resolve_memory_md)

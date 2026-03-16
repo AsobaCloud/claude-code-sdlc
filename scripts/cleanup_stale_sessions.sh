@@ -30,28 +30,21 @@ fi
 # Generate conversation token for session isolation (SEP-005)
 source "$(dirname "$0")/common.sh"
 
-if _is_test_mode; then
-    PROJECT_HASH=$(pwd | shasum | cut -c1-12)
-    PERSIST_DIR="${CLAUDE_TEST_PERSIST_DIR:-${HOME}/.claude/state/${PROJECT_HASH}}"
-    mkdir -p "$PERSIST_DIR"
-    generate_conversation_token >/dev/null 2>&1
-else
-    # Production: SQLite cleanup — remove conversations inactive for 7+ days
-    ensure_db
-    db_exec "DELETE FROM state WHERE conversation_id IN (SELECT id FROM conversations WHERE last_active < datetime('now', '-7 days'));"
-    db_exec "DELETE FROM sessions WHERE conversation_id IN (SELECT id FROM conversations WHERE last_active < datetime('now', '-7 days'));"
-    db_exec "DELETE FROM events WHERE conversation_id IN (SELECT id FROM conversations WHERE last_active < datetime('now', '-7 days'));"
-    db_exec "DELETE FROM conversations WHERE last_active < datetime('now', '-7 days');"
+# SQLite cleanup — remove conversations inactive for 7+ days
+ensure_db
+db_exec "DELETE FROM state WHERE conversation_id IN (SELECT id FROM conversations WHERE last_active < datetime('now', '-7 days'));"
+db_exec "DELETE FROM sessions WHERE conversation_id IN (SELECT id FROM conversations WHERE last_active < datetime('now', '-7 days'));"
+db_exec "DELETE FROM events WHERE conversation_id IN (SELECT id FROM conversations WHERE last_active < datetime('now', '-7 days'));"
+db_exec "DELETE FROM conversations WHERE last_active < datetime('now', '-7 days');"
 
-    # Clean up orphaned flat-file state directories
-    STATE_DIR="${HOME}/.claude/state"
-    if [[ -d "$STATE_DIR" ]]; then
-        find "$STATE_DIR" -mindepth 2 -maxdepth 2 -type d -empty -delete 2>/dev/null
-        find "$STATE_DIR" -mindepth 1 -maxdepth 1 -type d -empty -delete 2>/dev/null
-    fi
-
-    # Generate token for new conversation
-    generate_conversation_token >/dev/null 2>&1
+# Clean up orphaned flat-file state directories
+STATE_DIR="${HOME}/.claude/state"
+if [[ -d "$STATE_DIR" ]]; then
+    find "$STATE_DIR" -mindepth 2 -maxdepth 2 -type d -empty -delete 2>/dev/null
+    find "$STATE_DIR" -mindepth 1 -maxdepth 1 -type d -empty -delete 2>/dev/null
 fi
+
+# Generate token for new conversation
+generate_conversation_token >/dev/null 2>&1
 
 exit 0

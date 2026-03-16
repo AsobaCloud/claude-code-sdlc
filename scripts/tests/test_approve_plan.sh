@@ -26,16 +26,30 @@ NC='\033[0m'
 setup() {
     TEST_TMPDIR=$(mktemp -d)
     export HOME="${TEST_TMPDIR}/home"
-    export CLAUDE_TEST_PERSIST_DIR="${TEST_TMPDIR}/persist"
-    export CLAUDE_TEST_STATE_DIR="${CLAUDE_TEST_PERSIST_DIR}"
-    mkdir -p "$HOME/.claude/plans" "$CLAUDE_TEST_PERSIST_DIR"
-    init_persist_dir
+    WORKFLOW_DB="${HOME}/.claude/workflow.db"
+    _DB_INITIALIZED=""
+    export CONV_ID="test-session-001"
+    SESSION_ID=""
+    CONVERSATION_TOKEN=""
+    mkdir -p "$HOME/.claude/plans" "$HOME/.claude"
+    ensure_db
+    db_exec "INSERT OR IGNORE INTO conversations (id, project_dir) VALUES ('$(sql_escape "$CONV_ID")', '$(pwd)');"
+    db_exec "INSERT OR IGNORE INTO sessions (session_id, conversation_id) VALUES ('$(sql_escape "$CONV_ID")', '$(sql_escape "$CONV_ID")');"
+    PROJECT_HASH="test"
+    CONVERSATION_TOKEN="$CONV_ID"
+    PERSIST_DIR="${HOME}/.claude/state/${PROJECT_HASH}/${CONV_ID}"
+    mkdir -p "$PERSIST_DIR"
+    mkdir -p "$(conversation_plan_dir)"
 }
 
 teardown() {
     rm -rf "$TEST_TMPDIR"
-    unset CLAUDE_TEST_STATE_DIR CLAUDE_TEST_PERSIST_DIR
+    _DB_INITIALIZED=""
+    unset CONV_ID 2>/dev/null || true
+    SESSION_ID=""
+    CONVERSATION_TOKEN=""
     export HOME="${ORIGINAL_HOME}"
+    WORKFLOW_DB="${HOME}/.claude/workflow.db"
 }
 
 run_hook() {
@@ -108,7 +122,7 @@ PLAN
     echo "$plan_file"
 }
 
-HOOK_JSON='{"session_id":"test-session","tool_name":"ExitPlanMode"}'
+HOOK_JSON='{"session_id":"test-session-001","tool_name":"ExitPlanMode"}'
 
 # ══════════════════════════════════════════════════════════════════════
 # Scenario 1: Normal flow — PreToolUse writes bundle, PostToolUse preserves it
