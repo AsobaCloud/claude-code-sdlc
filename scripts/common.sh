@@ -159,7 +159,8 @@ init_hook() {
     SESSION_ID=$(echo "$HOOK_INPUT" | jq -r '.session_id // empty' 2>/dev/null)
 
     if [[ -z "$SESSION_ID" && -z "$CLAUDE_TEST_PERSIST_DIR" ]]; then
-        exit 0
+        echo '{"error":"BLOCKED: Hook system cannot verify session. SESSION_ID missing from hook input. Tool call denied (fail-closed)."}' >&2
+        exit 1
     fi
 
     init_persist_dir
