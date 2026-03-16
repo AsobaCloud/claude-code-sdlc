@@ -176,11 +176,9 @@ CREATE TABLE events (
 
 Production mode resolves `CONV_ID` with priority:
 
-1. `SESSION_ID` (from hook JSON) → look up `sessions` table
-2. `CONVERSATION_TOKEN` env var → look up `conversations` table
-3. MEMORY.md token → look up `conversations` table
-4. Most recent active conversation for `project_dir`
-5. Create new conversation (random hex token)
+1. `SESSION_ID` (from hook JSON) → look up `sessions` table; if not found, use `SESSION_ID` as `CONV_ID` directly (`INSERT OR IGNORE` into `conversations` and `sessions`)
+2. `CONVERSATION_TOKEN` env var or MEMORY.md token → use as conversation ID (`INSERT OR IGNORE` into `conversations`)
+3. No token available → fall back to `"no-token"`
 
 After resolution, the session is registered in `sessions` and `last_active` is updated.
 
@@ -276,7 +274,7 @@ Completed plans may be archived or deleted. No plan file persists indefinitely.
 
 ### Token resolution in `init_persist_dir()` (production mode)
 
-Resolution priority: `SESSION_ID` → `sessions` table lookup > `CONVERSATION_TOKEN` env var → `conversations` table > MEMORY.md token → `conversations` table > most recent active conversation for project > create new conversation. Using `sessions` table lookup as the primary source eliminates the MEMORY.md single-slot collision for all hook-based flows.
+Resolution priority: (1) `SESSION_ID` → `sessions` table lookup, or use `SESSION_ID` directly if not found; (2) `CONVERSATION_TOKEN` env var or MEMORY.md token → use as conversation ID; (3) fall back to `"no-token"`. Using `sessions` table lookup as the primary source eliminates the MEMORY.md single-slot collision for all hook-based flows.
 
 ### Invariants
 
@@ -292,15 +290,14 @@ Rules for safely editing the hook system itself (scripts in `~/.claude/scripts/`
 
 ### The bootstrapping problem
 
-When you change how PERSIST_DIR is computed (e.g., adding conversation token to the path), the currently-running approval becomes invisible — the hooks now look for state in a different directory than where it was written.
+When you change state storage logic (e.g., modifying `init_persist_dir` or `state_read`/`state_write`), the currently-running approval may become invisible if the hooks can no longer locate state. In production mode, state lives in `~/.claude/workflow.db` keyed by `conversation_id` — it survives path changes automatically. The risk is breaking the lookup logic itself.
 
 ### Rules
 
-1. **Before changing PERSIST_DIR computation:** Copy all state files from the old path to the new path.
-2. **After changing PERSIST_DIR computation:** Run `/approve` to rebuild approval at the new path if the copy didn't work.
-3. **Never compute PERSIST_DIR inline.** Always use `init_persist_dir()`. This ensures a single place to update.
-4. **Test with `CLAUDE_TEST_PERSIST_DIR`.** The test harness bypasses token scoping, so existing tests continue to work even when the production path changes.
-5. **When editing hooks that enforce the workflow:** Be aware that the hooks are live. A syntax error in `require_plan_approval.sh` will block ALL subsequent edits. Keep a terminal open with `~/.claude/scripts/restore_approval.sh` ready.
+1. **State survives path changes.** In production mode, state is in SQLite keyed by `conversation_id`, not file paths. Changing `PERSIST_DIR` computation does not lose state. If approval becomes invisible after a change, run `/approve` to rebuild it.
+2. **Never compute PERSIST_DIR inline.** Always use `init_persist_dir()`. This ensures a single place to update.
+3. **Test with `CLAUDE_TEST_PERSIST_DIR`.** The test harness bypasses SQLite and uses flat files, so existing tests continue to work even when the production path changes.
+4. **When editing hooks that enforce the workflow:** Be aware that the hooks are live. A syntax error in `require_plan_approval.sh` will block ALL subsequent edits. Keep a terminal open with `~/.claude/scripts/restore_approval.sh` ready.
 
 ---
 
@@ -310,7 +307,7 @@ When you change how PERSIST_DIR is computed (e.g., adding conversation token to 
 
 - CLAUDE.md (re-read from disk)
 - First 200 lines of MEMORY.md (including conversation token)
-- All state marker files on disk (PERSIST_DIR)
+- All state in `~/.claude/workflow.db` (production) or flat files in PERSIST_DIR (test mode)
 - This architecture document (if referenced from CLAUDE.md)
 
 ### What is lost
@@ -357,9 +354,9 @@ Read the injected WORKFLOW STATE block — it tells you exactly where you are.
 
 ### Correct behavior
 
-- **State isolation:** Each conversation has its own PERSIST_DIR (`{PROJECT_HASH}/{TOKEN}/`). Approval, validation, edit count, dirty flags — all isolated. No conversation can read or write another conversation's state.
+- **State isolation:** Each conversation's state is isolated by the `conversation_id` column in `~/.claude/workflow.db`. Approval, validation, edit count, dirty flags — all scoped to the conversation. No conversation can read or write another conversation's state. (In test mode, isolation is via separate `PERSIST_DIR` flat-file directories.)
 - **Plan file isolation:** Each conversation writes plans to `~/.claude/plans/{TOKEN}/`. Plan resolution functions (`newest_plan_file()`, `resolve_plan_file()`) only scan the conversation's own subdirectory.
-- **Token storage:** Each conversation's token is stored in its own PERSIST_DIR. MEMORY.md holds the most recent token as a convenience for compaction recovery, but is NOT the authoritative token store for concurrent sessions.
+- **Token storage:** MEMORY.md holds the most recent token as a convenience for compaction recovery. In production mode, the `sessions` table provides authoritative session → conversation mapping, making MEMORY.md a backup only.
 - **Invariant:** Two conversations MAY both be in active planning or editing phases simultaneously without interference. Neither conversation's hooks, state, or plan files affect the other.
 
 ---
@@ -446,8 +443,8 @@ Read the EXACT error message from the hook.
 │   → Read the plan file path from the injection. Read that file.
 │
 └─ Editing the hook system itself broke approval?
-    → Copy state files from old PERSIST_DIR to new PERSIST_DIR.
-    → Or tell user to type /approve.
+    → Run `/approve` to rebuild approval from plan file.
+    → State in SQLite survives path changes; only lookup logic breakage causes this.
 ```
 
 ### Universal rule
