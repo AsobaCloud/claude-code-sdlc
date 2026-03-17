@@ -2159,6 +2159,45 @@ else
     printf "${GREEN}  PASS${NC} 17.5: clear_all_state() removed from common.sh\n"
 fi
 
+# 17.6 No `local` keyword outside function bodies in hook scripts (SC2168)
+begin_test "17.6 No local keyword outside function bodies in hook scripts"
+FOUND_BAD_LOCAL=0
+BAD_LOCAL_DETAILS=""
+for script in "${SCRIPTS_DIR}"/*.sh; do
+    [[ -f "$script" ]] || continue
+    in_function=0
+    brace_depth=0
+    line_num=0
+    while IFS= read -r line; do
+        line_num=$(( line_num + 1 ))
+        # Track function entry: name() { or function name {
+        if [[ "$line" =~ ^[[:space:]]*(function[[:space:]]+)?[a-zA-Z_][a-zA-Z0-9_]*[[:space:]]*\(\)[[:space:]]*\{ ]] || \
+           [[ "$line" =~ ^[[:space:]]*function[[:space:]]+[a-zA-Z_][a-zA-Z0-9_]*[[:space:]]*\{ ]]; then
+            in_function=1
+            brace_depth=1
+        elif [[ "$in_function" -eq 1 ]]; then
+            # Count braces to track nesting
+            opens=$(echo "$line" | tr -cd '{' | wc -c)
+            closes=$(echo "$line" | tr -cd '}' | wc -c)
+            brace_depth=$(( brace_depth + opens - closes ))
+            if [[ "$brace_depth" -le 0 ]]; then
+                in_function=0
+                brace_depth=0
+            fi
+        fi
+        # Check for `local` at top level (outside functions)
+        if [[ "$in_function" -eq 0 ]] && [[ "$line" =~ ^[[:space:]]*local[[:space:]] ]]; then
+            FOUND_BAD_LOCAL=1
+            BAD_LOCAL_DETAILS="${BAD_LOCAL_DETAILS}  $(basename "$script"):${line_num}: ${line}\n"
+        fi
+    done < "$script"
+done
+if [[ "$FOUND_BAD_LOCAL" -eq 0 ]]; then
+    pass
+else
+    fail "Found 'local' outside function bodies:\n${BAD_LOCAL_DETAILS}"
+fi
+
 # ══════════════════════════════════════════════════════════════════
 # Final report
 # ══════════════════════════════════════════════════════════════════

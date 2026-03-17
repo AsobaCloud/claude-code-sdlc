@@ -75,12 +75,12 @@ elif state_exists planning; then
     PREV_PLAN=$(state_read previous_plan_file)
     # If breadcrumb keys are empty, query plans table for richer context
     if [[ -z "$PREV_OBJ" ]]; then
-        local prev_row
+        prev_row=""
         prev_row=$(get_previous_plan 2>/dev/null || true)
         if [[ -n "$prev_row" ]]; then
             PREV_PLAN=$(echo "$prev_row" | cut -d'|' -f2)
             # Extract objective from stored plan content
-            local prev_content
+            prev_content=""
             prev_content=$(echo "$prev_row" | cut -d'|' -f3)
             if [[ -n "$prev_content" ]]; then
                 PREV_OBJ=$(echo "$prev_content" | sed -n '/^##[[:space:]]*[Oo]bjective/,/^##/p' | tail -n +2 | grep -v '^## ' | sed '/^[[:space:]]*$/d' | head -1)
