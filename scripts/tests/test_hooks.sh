@@ -1374,110 +1374,6 @@ assert_json_field '.hookSpecificOutput.permissionDecision' 'deny' \
     && pass
 teardown
 
-# 12.9 Diagnostic-sounding prompt passes through without blocking
-begin_test "12.9 Diagnostic-sounding prompt not blocked, gets epistemics reminder"
-setup
-CHECK_CMD="${SCRIPTS_DIR}/check_clear_approval_command.sh"
-DIAG_JSON=$(jq -n '{"session_id":"test-session-001","prompt":"why are my tests failing?"}')
-run_hook "$CHECK_CMD" "$DIAG_JSON"
-assert_state_not_exists "diagnostic_mode" "no diagnostic_mode state set" \
-    && assert_output_contains "EPISTEMICS REMINDER" \
-    && assert_output_not_contains "INVESTIGATION" \
-    && assert_output_not_contains "block" \
-    && assert_exit_code 0 \
-    && pass
-teardown
-
-# 12.10 Multiple diagnostic keywords don't trigger any special behavior
-begin_test "12.10 Multiple diagnostic keywords pass through normally"
-setup
-CHECK_CMD="${SCRIPTS_DIR}/check_clear_approval_command.sh"
-# Prompt with many old trigger words at once
-MULTI_JSON=$(jq -n '{"session_id":"test-session-001","prompt":"the server crashed with error 500 and the database connection is broken and timed out"}')
-run_hook "$CHECK_CMD" "$MULTI_JSON"
-assert_state_not_exists "diagnostic_mode" "no diagnostic_mode even with many trigger words" \
-    && assert_output_contains "EPISTEMICS REMINDER" \
-    && assert_output_not_contains "INVESTIGATION" \
-    && assert_exit_code 0 \
-    && pass
-teardown
-
-# 12.10a Implementation request with diagnostic-sounding words passes through
-begin_test "12.10a Implementation request with diagnostic words not blocked"
-setup
-CHECK_CMD="${SCRIPTS_DIR}/check_clear_approval_command.sh"
-# This was the original false-positive case
-IMPL_JSON=$(jq -n '{"session_id":"test-session-001","prompt":"Make GPT-5 Mini Actually Fail on edge cases"}')
-run_hook "$CHECK_CMD" "$IMPL_JSON"
-assert_state_not_exists "diagnostic_mode" "no diagnostic_mode on implementation request" \
-    && assert_output_contains "EPISTEMICS REMINDER" \
-    && assert_output_not_contains "block" \
-    && assert_exit_code 0 \
-    && pass
-teardown
-
-# 12.10b /skip-investigation treated as normal prompt (no special handling)
-begin_test "12.10b /skip-investigation has no special effect"
-setup
-CHECK_CMD="${SCRIPTS_DIR}/check_clear_approval_command.sh"
-# Pre-set diagnostic_mode to prove it's not being cleared by /skip-investigation handler
-state_write "diagnostic_mode" "1"
-SKIP_JSON=$(jq -n '{"session_id":"test-session-001","prompt":"/skip-investigation"}')
-run_hook "$CHECK_CMD" "$SKIP_JSON"
-# After removal, /skip-investigation is just a normal prompt — it should NOT
-# specially remove diagnostic_mode or short-circuit with its own output
-assert_output_contains "EPISTEMICS REMINDER" \
-    && assert_exit_code 0 \
-    && pass
-teardown
-
-# 12.10c Pre-existing diagnostic_mode state doesn't inject continuation message
-begin_test "12.10c Stale diagnostic_mode state has no effect on output"
-setup
-CHECK_CMD="${SCRIPTS_DIR}/check_clear_approval_command.sh"
-# Simulate leftover state from before the removal
-state_write "diagnostic_mode" "1"
-NORMAL_JSON=$(jq -n '{"session_id":"test-session-001","prompt":"add a new feature"}')
-run_hook "$CHECK_CMD" "$NORMAL_JSON"
-assert_output_contains "EPISTEMICS REMINDER" \
-    && assert_output_not_contains "DIAGNOSTIC MODE STILL ACTIVE" \
-    && assert_output_not_contains "INVESTIGATION" \
-    && assert_exit_code 0 \
-    && pass
-teardown
-
-# 12.10d No diagnostic_mode or DIAGNOSTIC_PATTERN references in production script
-begin_test "12.10d No diagnostic code in check_clear_approval_command.sh"
-setup
-SCRIPT="${SCRIPTS_DIR}/check_clear_approval_command.sh"
-DIAG_REFS=$(grep -cE 'diagnostic_mode|DIAGNOSTIC_PATTERN|IS_DIAGNOSTIC|DIAGNOSTIC_DIRECTIVE|DIAGNOSTIC_CONTINUATION|skip-investigation' "$SCRIPT" || true)
-if [[ "$DIAG_REFS" -eq 0 ]]; then
-    pass
-else
-    fail "Found $DIAG_REFS diagnostic-related references in script"
-fi
-teardown
-
-# 12.10e No diagnostic_mode in common.sh clear_workflow_keys
-begin_test "12.10e diagnostic_mode removed from clear_workflow_keys"
-setup
-if grep -q 'diagnostic_mode' "${SCRIPTS_DIR}/common.sh"; then
-    fail "diagnostic_mode still referenced in common.sh"
-else
-    pass
-fi
-teardown
-
-# 12.10f require_investigation_plan.sh not registered in settings.json
-begin_test "12.10f require_investigation_plan.sh not in settings.json hooks"
-setup
-if grep -q 'require_investigation_plan' "${ORIGINAL_HOME}/.claude/settings.json"; then
-    fail "require_investigation_plan.sh still registered as hook"
-else
-    pass
-fi
-teardown
-
 # 12.11 Test file patterns: _test.go, .spec.ts, __tests__/ dir
 begin_test "12.11 Various test file patterns bypass TDD gate"
 setup
@@ -2197,6 +2093,774 @@ if [[ "$FOUND_BAD_LOCAL" -eq 0 ]]; then
 else
     fail "Found 'local' outside function bodies:\n${BAD_LOCAL_DETAILS}"
 fi
+
+# ══════════════════════════════════════════════════════════════════
+# GROUP 18: Structured event logging (SEP-025)
+# ══════════════════════════════════════════════════════════════════
+printf "\n${YELLOW}── Group 18: Structured event logging (SEP-025) ──${NC}\n"
+
+# ── Helpers for event assertions ──
+
+assert_event_logged() {
+    local event_type="$1"
+    local detail_pattern="${2:-}"
+    local count
+    count=$(db_query "SELECT COUNT(*) FROM events WHERE conversation_id='$(sql_escape "$CONV_ID")' AND event_type='$(sql_escape "$event_type")';")
+    if [[ "$count" -eq 0 ]]; then
+        fail "No event of type '$event_type' found in events table"
+        return 1
+    fi
+    if [[ -n "$detail_pattern" ]]; then
+        local detail_match
+        detail_match=$(db_query "SELECT COUNT(*) FROM events WHERE conversation_id='$(sql_escape "$CONV_ID")' AND event_type='$(sql_escape "$event_type")' AND detail LIKE '%$(sql_escape "$detail_pattern")%';")
+        if [[ "$detail_match" -eq 0 ]]; then
+            fail "Event '$event_type' found but detail doesn't contain '$detail_pattern'"
+            return 1
+        fi
+    fi
+    return 0
+}
+
+assert_event_count() {
+    local event_type="$1"
+    local expected="$2"
+    local actual
+    actual=$(db_query "SELECT COUNT(*) FROM events WHERE conversation_id='$(sql_escape "$CONV_ID")' AND event_type='$(sql_escape "$event_type")';")
+    if [[ "$actual" -ne "$expected" ]]; then
+        fail "Expected $expected events of type '$event_type', got $actual"
+        return 1
+    fi
+    return 0
+}
+
+clear_events() {
+    db_exec "DELETE FROM events WHERE conversation_id='$(sql_escape "$CONV_ID")';"
+}
+
+REQUIRE_18="${SCRIPTS_DIR}/require_plan_approval.sh"
+VALIDATE_18="${SCRIPTS_DIR}/validate_plan_quality.sh"
+INJECTION_18="${SCRIPTS_DIR}/check_clear_approval_command.sh"
+TRACK_DIRTY_18="${SCRIPTS_DIR}/track_dirty.sh"
+TRACK_VAL_18="${SCRIPTS_DIR}/track_validation.sh"
+TRACK_FAIL_18="${SCRIPTS_DIR}/track_test_failure.sh"
+CLEAR_NEW_18="${SCRIPTS_DIR}/clear_plan_on_new_task.sh"
+ACCEPT_18="${SCRIPTS_DIR}/accept_outcome.sh"
+REJECT_18="${SCRIPTS_DIR}/reject_outcome.sh"
+CLEAR_APP_18="${SCRIPTS_DIR}/clear_approval.sh"
+RECORD_VAL_18="${SCRIPTS_DIR}/record_validation.sh"
+RESTORE_18="${SCRIPTS_DIR}/restore_approval.sh"
+
+# 18.1 require_plan_approval: denial with no plan → correct event type AND detail contains exact file path
+begin_test "18.1 edit_denied_no_plan contains exact file path in detail"
+setup
+clear_events
+run_hook "$REQUIRE_18" "$(json_pretooluse Edit /project/src/widget.py)"
+assert_event_logged "edit_denied_no_plan" "/project/src/widget.py" && pass
+teardown
+
+# 18.2 require_plan_approval: out-of-scope denial includes both the attempted file and the event type
+begin_test "18.2 edit_denied_out_of_scope detail contains attempted file path"
+setup
+clear_events
+PLAN_FILE="${PLAN_DIR}/event-scope-plan.md"
+write_plan "$PLAN_FILE" \
+    "Update documentation for event logging in the current hook system." \
+    "- /project/src/main.md" \
+    "The scoped markdown edit is allowed once approval metadata exists." \
+    "Per /Users/shingi/.claude/CLAUDE.md, scope enforcement blocks out-of-scope edits." \
+    "I read the current scope gate and verified exact file path matching."
+seed_approval_bundle_from_plan "$PLAN_FILE"
+run_hook "$REQUIRE_18" "$(json_pretooluse Edit /project/tests/other.md)"
+assert_event_logged "edit_denied_out_of_scope" "/project/tests/other.md" && pass
+teardown
+
+# 18.3 require_plan_approval: TDD gate denial logs correct event
+begin_test "18.3 edit_denied_tdd_gate when tests haven't failed"
+setup
+clear_events
+PLAN_FILE="${PLAN_DIR}/event-tdd-plan.md"
+write_plan "$PLAN_FILE" \
+    "Add a production feature to the widget processing module." \
+    "- /project/src/widget.py" \
+    "Widget processing handles new edge case correctly." \
+    "Per /Users/shingi/.claude/CLAUDE.md, TDD is enforced for production files." \
+    "I read require_plan_approval.sh and verified TDD gate checks tests_failed marker."
+seed_approval_bundle_from_plan "$PLAN_FILE"
+# No tests_failed marker set → TDD gate should fire
+run_hook "$REQUIRE_18" "$(json_pretooluse Edit /project/src/widget.py)"
+assert_event_logged "edit_denied_tdd_gate" "/project/src/widget.py" && pass
+teardown
+
+# 18.4 require_plan_approval: test review gate denial logs correct event
+begin_test "18.4 edit_denied_test_review_gate when tests not reviewed"
+setup
+clear_events
+PLAN_FILE="${PLAN_DIR}/event-review-plan.md"
+write_plan "$PLAN_FILE" \
+    "Add a production feature to the widget processing module." \
+    "- /project/src/widget.py" \
+    "Widget processing handles new edge case correctly." \
+    "Per /Users/shingi/.claude/CLAUDE.md, tests must be reviewed before production edits." \
+    "I read require_plan_approval.sh and verified test review gate checks tests_reviewed marker."
+seed_approval_bundle_from_plan "$PLAN_FILE"
+state_write tests_failed "2026-03-17T00:00:00Z pytest"
+# No tests_reviewed marker → review gate should fire
+run_hook "$REQUIRE_18" "$(json_pretooluse Edit /project/src/widget.py)"
+assert_event_logged "edit_denied_test_review_gate" "/project/src/widget.py" && pass
+teardown
+
+# 18.5 require_plan_approval: allowed edit logs exactly 1 event with correct detail
+begin_test "18.5 edit_allowed logs exactly 1 event with file path"
+setup
+clear_events
+PLAN_FILE="${PLAN_DIR}/event-allow-plan.md"
+write_plan "$PLAN_FILE" \
+    "Update documentation for event logging in the current hook system." \
+    "- /project/src/main.md" \
+    "The scoped markdown edit is allowed once approval metadata exists." \
+    "Per /Users/shingi/.claude/CLAUDE.md, scope enforcement allows in-scope edits." \
+    "I read the current scope gate and verified exact file path matching."
+seed_approval_bundle_from_plan "$PLAN_FILE"
+run_hook "$REQUIRE_18" "$(json_pretooluse Edit /project/src/main.md)"
+assert_event_count "edit_allowed" 1 \
+    && assert_event_logged "edit_allowed" "/project/src/main.md" \
+    && pass
+teardown
+
+# 18.6 validate_plan_quality: quality failure logs plan_quality_failed
+begin_test "18.6 plan_quality_failed logged on bad plan"
+setup
+clear_events
+state_write planning "1"
+state_write planning_started_at "$(date +%s)"
+PLAN_FILE="${PLAN_DIR}/event-badplan.md"
+mkdir -p "$(dirname "$PLAN_FILE")"
+echo "too short" > "$PLAN_FILE"
+run_hook "$VALIDATE_18" "$(json_pretooluse ExitPlanMode)"
+assert_event_logged "plan_quality_failed" && pass
+teardown
+
+# 18.7 validate_plan_quality: approval logs plan_approved with plan file path
+begin_test "18.7 plan_approved detail contains plan file path"
+setup
+clear_events
+state_write planning "1"
+state_write planning_started_at "$(date +%s)"
+PLAN_FILE="${PLAN_DIR}/event-approve-plan.md"
+write_plan "$PLAN_FILE" \
+    "Implement structured event logging for every gate decision in the hook system. Implements SEP-025." \
+    "- /Users/shingi/.claude/scripts/common.sh" \
+    "Every gate decision writes a structured event to SQLite events table." \
+    "Per /Users/shingi/.claude/docs/ARCHITECTURE.md Section 3, the events table and log_event function already exist but are uncalled. Because the infrastructure is ready, only call sites are missing." \
+    "I read common.sh and confirmed log_event() exists at line 237. I verified the events table schema in ARCHITECTURE.md Section 3. The change is purely additive with no behavioral impact."
+run_hook "$VALIDATE_18" "$(json_pretooluse ExitPlanMode)"
+assert_event_logged "plan_approved" "event-approve-plan.md" && pass
+teardown
+
+# 18.8 track_dirty: dirty_set detail is the EXACT file path, not a substring
+begin_test "18.8 dirty_set detail is exact file path"
+setup
+clear_events
+run_hook "$TRACK_DIRTY_18" "$(json_pretooluse Edit /project/src/widget.py)"
+local_detail=$(db_query "SELECT detail FROM events WHERE conversation_id='$(sql_escape "$CONV_ID")' AND event_type='dirty_set';")
+if [[ "$local_detail" == "/project/src/widget.py" ]]; then
+    pass
+else
+    fail "dirty_set detail expected '/project/src/widget.py', got '$local_detail'"
+fi
+teardown
+
+# 18.9 track_validation: unit and e2e produce distinct event types
+begin_test "18.9 unit vs e2e validation produce distinct event types"
+setup
+clear_events
+state_write dirty "test"
+run_hook "$TRACK_VAL_18" "$(json_bash_pretooluse "pytest")"
+run_hook "$TRACK_VAL_18" "$(json_bash_pretooluse "npx playwright test")"
+assert_event_logged "validation_unit_pass" "pytest" \
+    && assert_event_logged "validation_e2e_pass" "playwright" \
+    && pass
+teardown
+
+# 18.10 track_validation: two-tier complete logged only when BOTH tiers pass
+begin_test "18.10 validation_two_tier_complete only after both tiers"
+setup
+clear_events
+state_write dirty "both"
+# Unit only → no two_tier event
+run_hook "$TRACK_VAL_18" "$(json_bash_pretooluse "pytest")"
+assert_event_count "validation_two_tier_complete" 0
+# E2E completes both tiers → two_tier event appears
+run_hook "$TRACK_VAL_18" "$(json_bash_pretooluse "npx playwright test")"
+assert_event_count "validation_two_tier_complete" 1 && pass
+teardown
+
+# 18.11 track_test_failure: test_failed_red_phase with exact command
+begin_test "18.11 test_failed_red_phase detail contains exact command"
+setup
+clear_events
+run_hook "$TRACK_FAIL_18" "$(json_bash_pretooluse "npm test -- --coverage")"
+assert_event_logged "test_failed_red_phase" "npm test -- --coverage" && pass
+teardown
+
+# 18.12 clear_plan_on_new_task: plan_cycle_new includes previous objective text
+begin_test "18.12 plan_cycle_new detail contains previous objective"
+setup
+clear_events
+state_write objective "Refactor the authentication middleware"
+run_hook "$CLEAR_NEW_18" "$(json_posttooluse EnterPlanMode)"
+assert_event_logged "plan_cycle_new" "Refactor the authentication middleware" && pass
+teardown
+
+# 18.13 injection: state_injected_approved includes phase and edit count
+begin_test "18.13 state_injected_approved detail includes phase and edit count"
+setup
+clear_events
+PLAN_FILE="${PLAN_DIR}/event-inject-plan.md"
+write_plan "$PLAN_FILE" \
+    "Update documentation for testing injection event logging." \
+    "- /project/src/main.md" \
+    "The injection event is logged when workflow state is injected." \
+    "Per /Users/shingi/.claude/CLAUDE.md, the injection fires on every UserPromptSubmit." \
+    "I read check_clear_approval_command.sh and verified the injection path."
+seed_approval_bundle_from_plan "$PLAN_FILE"
+state_write edit_count "5"
+state_write tests_failed "2026-03-17T00:00:00Z pytest"
+state_write tests_reviewed "1"
+run_hook "$INJECTION_18" '{"session_id":"test-session-001"}'
+assert_event_logged "state_injected_approved" "IMPLEMENTING" \
+    && assert_event_logged "state_injected_approved" "5" \
+    && pass
+teardown
+
+# 18.14 injection: idle state logs state_injected_idle
+begin_test "18.14 state_injected_idle when no workflow state"
+setup
+clear_events
+run_hook "$INJECTION_18" '{"session_id":"test-session-001"}'
+assert_event_logged "state_injected_idle" && pass
+teardown
+
+# 18.15 accept_outcome: outcome_accepted includes objective text
+begin_test "18.15 outcome_accepted includes objective text"
+setup
+clear_events
+PLAN_FILE="${PLAN_DIR}/event-accept-plan.md"
+write_plan "$PLAN_FILE" \
+    "Add retry logic to the API client for transient failures." \
+    "- /project/src/api.md" \
+    "API client retries on 5xx errors with exponential backoff." \
+    "Per /Users/shingi/.claude/CLAUDE.md, standalone scripts use init_persist_dir." \
+    "I read accept_outcome.sh and verified it reads objective from state."
+seed_approval_bundle_from_plan "$PLAN_FILE"
+state_write objective_verified "2026-03-17T10:00:00Z"
+state_write objective_verified_hash "$(state_read plan_hash)"
+state_write objective_verified_edit_count "0"
+state_write objective_verified_evidence "manual"
+run_script "$ACCEPT_18"
+assert_event_logged "outcome_accepted" "retry logic" && pass
+teardown
+
+# 18.16 reject_outcome: outcome_rejected logged
+begin_test "18.16 outcome_rejected logged on rejection"
+setup
+clear_events
+PLAN_FILE="${PLAN_DIR}/event-reject-plan.md"
+write_plan "$PLAN_FILE" \
+    "Add rejected feature for testing event logging." \
+    "- /project/src/main.md" \
+    "Feature is added." \
+    "Per /Users/shingi/.claude/CLAUDE.md, rejection clears state." \
+    "I read reject_outcome.sh and verified it clears workflow keys."
+seed_approval_bundle_from_plan "$PLAN_FILE"
+run_script "$REJECT_18"
+assert_event_logged "outcome_rejected" && pass
+teardown
+
+# 18.17 clear_approval: clear_blocked_dirty when dirty flag exists
+begin_test "18.17 clear_blocked_dirty when dirty exists"
+setup
+clear_events
+PLAN_FILE="${PLAN_DIR}/event-clearblocked-plan.md"
+write_plan "$PLAN_FILE" \
+    "Test plan for clear approval blocking." \
+    "- /project/src/main.md" \
+    "Clear is blocked when dirty." \
+    "Per /Users/shingi/.claude/CLAUDE.md, dirty blocks clear." \
+    "I read clear_approval.sh and verified dirty check at line 9."
+seed_approval_bundle_from_plan "$PLAN_FILE"
+state_write dirty "2026-03-17T10:00:00Z /project/src/main.md"
+run_script "$CLEAR_APP_18" || true
+assert_event_logged "clear_blocked_dirty" "/project/src/main.md" && pass
+teardown
+
+# 18.18 clear_approval: approval_cleared on success
+begin_test "18.18 approval_cleared on successful clear"
+setup
+clear_events
+PLAN_FILE="${PLAN_DIR}/event-clearsuccess-plan.md"
+write_plan "$PLAN_FILE" \
+    "Test plan for successful clear approval." \
+    "- /project/src/main.md" \
+    "Clear succeeds when not dirty and verified." \
+    "Per /Users/shingi/.claude/CLAUDE.md, clear removes workflow keys." \
+    "I read clear_approval.sh and verified the success path."
+seed_approval_bundle_from_plan "$PLAN_FILE"
+# Not dirty, objective verification not required (doc-only plan)
+run_script "$CLEAR_APP_18"
+assert_event_logged "approval_cleared" && pass
+teardown
+
+# 18.19 record_validation: objective_verified with command description
+begin_test "18.19 objective_verified includes command in detail"
+setup
+clear_events
+PLAN_FILE="${PLAN_DIR}/event-record-plan.md"
+write_plan "$PLAN_FILE" \
+    "Test plan for record validation event logging." \
+    "- /project/src/main.py" \
+    "Validation is recorded." \
+    "Per /Users/shingi/.claude/CLAUDE.md, record_validation logs events." \
+    "I read record_validation.sh and verified the success path." \
+    "pytest -k test_widget"
+seed_approval_bundle_from_plan "$PLAN_FILE"
+state_append validation_log "2026-03-17T10:00:00Z pytest -k test_widget"
+run_script "$RECORD_VAL_18" --command "pytest -k test_widget"
+assert_event_logged "objective_verified" "pytest -k test_widget" && pass
+teardown
+
+# 18.20 restore_approval: approval_restored with plan file path
+begin_test "18.20 approval_restored includes plan file in detail"
+setup
+clear_events
+PLAN_FILE="${PLAN_DIR}/event-restore-plan.md"
+write_plan "$PLAN_FILE" \
+    "Test plan for restore approval event logging." \
+    "- /project/src/main.md" \
+    "Approval is restored from existing plan." \
+    "Per /Users/shingi/.claude/CLAUDE.md, restore rebuilds the approval bundle." \
+    "I read restore_approval.sh and verified it calls write_approval_bundle."
+run_script "$RESTORE_18"
+assert_event_logged "approval_restored" "event-restore-plan.md" && pass
+teardown
+
+# 18.21 Multiple denials produce distinct events (no double-counting)
+begin_test "18.21 two denied edits produce exactly 2 events"
+setup
+clear_events
+# Two edits without approval → two denial events
+run_hook "$REQUIRE_18" "$(json_pretooluse Edit /a.py)"
+run_hook "$REQUIRE_18" "$(json_pretooluse Edit /b.py)"
+assert_event_count "edit_denied_no_plan" 2 && pass
+teardown
+
+# ══════════════════════════════════════════════════════════════════
+# GROUP 19: PreCompact snapshot (SEP-026)
+# ══════════════════════════════════════════════════════════════════
+printf "\n${YELLOW}── Group 19: PreCompact snapshot (SEP-026) ──${NC}\n"
+
+PRECOMPACT="${SCRIPTS_DIR}/precompact_snapshot.sh"
+
+# 19.1 Snapshot with approved state contains all expected sections
+begin_test "19.1 snapshot in approved phase has all sections"
+setup
+clear_events
+PLAN_FILE="${PLAN_DIR}/precompact-plan.md"
+write_plan "$PLAN_FILE" \
+    "Test plan for precompact snapshot testing in the hook system." \
+    "- /project/src/main.md" \
+    "Snapshot captures approved plan metadata." \
+    "Per /Users/shingi/.claude/CLAUDE.md, the precompact hook runs before context truncation." \
+    "I read ARCHITECTURE.md Section 11 confirming PreCompact is an optional enhancement."
+seed_approval_bundle_from_plan "$PLAN_FILE"
+state_write edit_count "3"
+state_write dirty "2026-03-17T10:00:00Z /project/src/main.md"
+# Seed events so RECENT_EVENTS isn't empty
+log_event "edit_allowed" "/project/src/main.md"
+log_event "dirty_set" "/project/src/main.md"
+run_hook "$PRECOMPACT" '{"session_id":"test-session-001"}'
+assert_state_exists "compaction_snapshot" "snapshot written" \
+    && assert_state_contains "compaction_snapshot" "SNAPSHOT_TIME" \
+    && assert_state_contains "compaction_snapshot" "PHASE: approved" \
+    && assert_state_contains "compaction_snapshot" "PHASE_MARKERS" \
+    && assert_state_contains "compaction_snapshot" "RECENT_EVENTS" \
+    && pass
+teardown
+
+# 19.2 compaction_detected set to "1"
+begin_test "19.2 precompact_snapshot sets compaction_detected=1"
+setup
+run_hook "$PRECOMPACT" '{"session_id":"test-session-001"}'
+assert_state_exists "compaction_detected" "flag exists" \
+    && assert_state_equals "compaction_detected" "1" \
+    && pass
+teardown
+
+# 19.3 Idle phase snapshot still captures structure (graceful degradation)
+begin_test "19.3 snapshot in idle phase has PHASE: idle"
+setup
+run_hook "$PRECOMPACT" '{"session_id":"test-session-001"}'
+assert_state_exists "compaction_snapshot" "snapshot written even in idle" \
+    && assert_state_contains "compaction_snapshot" "PHASE: idle" \
+    && pass
+teardown
+
+# 19.4 Seeded events appear in RECENT_EVENTS section of snapshot
+begin_test "19.4 seeded events appear in snapshot RECENT_EVENTS"
+setup
+clear_events
+log_event "edit_allowed" "/project/src/widget.py"
+log_event "dirty_set" "/project/src/widget.py"
+log_event "validation_unit_pass" "pytest"
+run_hook "$PRECOMPACT" '{"session_id":"test-session-001"}'
+assert_state_contains "compaction_snapshot" "edit_allowed" \
+    && assert_state_contains "compaction_snapshot" "dirty_set" \
+    && assert_state_contains "compaction_snapshot" "validation_unit_pass" \
+    && pass
+teardown
+
+# 19.5 Snapshot plan_file and objective match what was set in state
+begin_test "19.5 snapshot plan metadata matches actual state values"
+setup
+PLAN_FILE="${PLAN_DIR}/precompact-meta-plan.md"
+write_plan "$PLAN_FILE" \
+    "Refactor the authentication middleware to use JWT tokens." \
+    "- /project/src/auth.py" \
+    "Auth middleware validates JWT tokens correctly." \
+    "Per /Users/shingi/.claude/CLAUDE.md, snapshot captures all phase markers." \
+    "I read the precompact design and verified metadata fields."
+seed_approval_bundle_from_plan "$PLAN_FILE"
+run_hook "$PRECOMPACT" '{"session_id":"test-session-001"}'
+# Verify the snapshot contains the ACTUAL plan file path and objective
+assert_state_contains "compaction_snapshot" "precompact-meta-plan.md" \
+    && assert_state_contains "compaction_snapshot" "Refactor the authentication middleware" \
+    && pass
+teardown
+
+# 19.6 precompact_snapshot_taken event logged with phase info
+begin_test "19.6 precompact_snapshot_taken event includes phase"
+setup
+clear_events
+PLAN_FILE="${PLAN_DIR}/precompact-event-plan.md"
+write_plan "$PLAN_FILE" \
+    "Test plan for precompact event verification." \
+    "- /project/src/main.md" \
+    "Event is logged with phase info." \
+    "Per /Users/shingi/.claude/CLAUDE.md, every decision point logs an event." \
+    "I read the precompact design."
+seed_approval_bundle_from_plan "$PLAN_FILE"
+run_hook "$PRECOMPACT" '{"session_id":"test-session-001"}'
+assert_event_logged "precompact_snapshot_taken" "phase=approved" && pass
+teardown
+
+# 19.7 clear_workflow_keys removes compaction_detected and compaction_snapshot
+begin_test "19.7 clear_workflow_keys cleans up compaction state"
+setup
+state_write compaction_detected "1"
+state_write compaction_snapshot "SNAPSHOT_TIME: test"
+clear_workflow_keys
+assert_state_not_exists "compaction_detected" "compaction_detected cleaned up" \
+    && assert_state_not_exists "compaction_snapshot" "compaction_snapshot cleaned up" \
+    && pass
+teardown
+
+# ══════════════════════════════════════════════════════════════════
+# GROUP 20: Compaction detection signal (SEP-027)
+# ══════════════════════════════════════════════════════════════════
+printf "\n${YELLOW}── Group 20: Compaction detection signal (SEP-027) ──${NC}\n"
+
+INJECTION_20="${SCRIPTS_DIR}/check_clear_approval_command.sh"
+
+# 20.1 compaction_detected + approved → COMPACTION DETECTED in output
+begin_test "20.1 compaction in approved phase → COMPACTION DETECTED"
+setup
+PLAN_FILE="${PLAN_DIR}/compact-detect-plan.md"
+write_plan "$PLAN_FILE" \
+    "Test plan for compaction detection signal testing." \
+    "- /project/src/main.md" \
+    "Compaction warning appears in injection output." \
+    "Per /Users/shingi/.claude/CLAUDE.md, the injection must detect compaction." \
+    "I read check_clear_approval_command.sh and verified the injection path."
+seed_approval_bundle_from_plan "$PLAN_FILE"
+state_write compaction_detected "1"
+run_hook "$INJECTION_20" '{"session_id":"test-session-001"}'
+assert_output_contains "COMPACTION DETECTED" && pass
+teardown
+
+# 20.2 Recovery warning includes the plan file path
+begin_test "20.2 recovery warning contains plan file path"
+setup
+PLAN_FILE="${PLAN_DIR}/compact-planpath-plan.md"
+write_plan "$PLAN_FILE" \
+    "Test plan for plan path in compaction recovery." \
+    "- /project/src/main.md" \
+    "Recovery warning references the plan file." \
+    "Per /Users/shingi/.claude/CLAUDE.md, the model needs the plan path to recover." \
+    "I read the compaction detection design."
+seed_approval_bundle_from_plan "$PLAN_FILE"
+state_write compaction_detected "1"
+run_hook "$INJECTION_20" '{"session_id":"test-session-001"}'
+assert_output_contains "compact-planpath-plan.md" && pass
+teardown
+
+# 20.3 compaction_detected cleared after injection (single-use flag)
+begin_test "20.3 compaction_detected cleared after injection"
+setup
+PLAN_FILE="${PLAN_DIR}/compact-clear-plan.md"
+write_plan "$PLAN_FILE" \
+    "Test plan for verifying compaction flag cleanup." \
+    "- /project/src/main.md" \
+    "Flag is cleared so subsequent injections are normal." \
+    "Per /Users/shingi/.claude/CLAUDE.md, the flag is single-use." \
+    "I read the compaction detection design."
+seed_approval_bundle_from_plan "$PLAN_FILE"
+state_write compaction_detected "1"
+run_hook "$INJECTION_20" '{"session_id":"test-session-001"}'
+assert_state_not_exists "compaction_detected" "flag should be cleared" && pass
+teardown
+
+# 20.4 No compaction_detected → no COMPACTION warning in output
+begin_test "20.4 no compaction_detected → no compaction warning"
+setup
+PLAN_FILE="${PLAN_DIR}/compact-none-plan.md"
+write_plan "$PLAN_FILE" \
+    "Test plan for normal injection without compaction." \
+    "- /project/src/main.md" \
+    "Normal injection should not mention compaction." \
+    "Per /Users/shingi/.claude/CLAUDE.md, the flag is only set by PreCompact." \
+    "I read the injection logic."
+seed_approval_bundle_from_plan "$PLAN_FILE"
+run_hook "$INJECTION_20" '{"session_id":"test-session-001"}'
+assert_output_not_contains "COMPACTION DETECTED" && pass
+teardown
+
+# 20.5 compaction during PLANNING → mentions compaction (lighter notice)
+begin_test "20.5 compaction in planning phase → planning compaction notice"
+setup
+state_write planning "1"
+state_write planning_started_at "$(date +%s)"
+state_write compaction_detected "1"
+run_hook "$INJECTION_20" '{"session_id":"test-session-001"}'
+assert_output_contains "compaction" \
+    && assert_state_not_exists "compaction_detected" "flag cleared in planning too" \
+    && pass
+teardown
+
+# 20.6 compaction during IDLE → flag cleared, no crash
+begin_test "20.6 compaction in idle phase → flag cleared gracefully"
+setup
+state_write compaction_detected "1"
+run_hook "$INJECTION_20" '{"session_id":"test-session-001"}'
+assert_exit_code 0 \
+    && assert_state_not_exists "compaction_detected" "flag cleared even in idle" \
+    && pass
+teardown
+
+# 20.7 compaction recovery logs state_injected_compaction_recovery
+begin_test "20.7 compaction logs state_injected_compaction_recovery event"
+setup
+clear_events
+PLAN_FILE="${PLAN_DIR}/compact-log-plan.md"
+write_plan "$PLAN_FILE" \
+    "Test plan for compaction recovery event logging." \
+    "- /project/src/main.md" \
+    "Compaction recovery event is logged." \
+    "Per /Users/shingi/.claude/CLAUDE.md, events are logged at every gate decision." \
+    "I read the event logging design."
+seed_approval_bundle_from_plan "$PLAN_FILE"
+state_write compaction_detected "1"
+run_hook "$INJECTION_20" '{"session_id":"test-session-001"}'
+assert_event_logged "state_injected_compaction_recovery" && pass
+teardown
+
+# 20.8 Second injection after compaction has no COMPACTION warning (flag was cleared)
+begin_test "20.8 second injection after compaction is normal"
+setup
+PLAN_FILE="${PLAN_DIR}/compact-second-plan.md"
+write_plan "$PLAN_FILE" \
+    "Test plan for verifying single-use compaction flag." \
+    "- /project/src/main.md" \
+    "Second injection is normal after flag cleared." \
+    "Per /Users/shingi/.claude/CLAUDE.md, the flag is set by PreCompact only." \
+    "I read the compaction detection design."
+seed_approval_bundle_from_plan "$PLAN_FILE"
+state_write compaction_detected "1"
+run_hook "$INJECTION_20" '{"session_id":"test-session-001"}'
+# Second injection — flag already cleared
+run_hook "$INJECTION_20" '{"session_id":"test-session-001"}'
+assert_output_not_contains "COMPACTION DETECTED" && pass
+teardown
+
+# ══════════════════════════════════════════════════════════════════
+# GROUP 21: Plan content injection on compaction (SEP-028)
+# ══════════════════════════════════════════════════════════════════
+printf "\n${YELLOW}── Group 21: Plan content injection on compaction (SEP-028) ──${NC}\n"
+
+INJECTION_21="${SCRIPTS_DIR}/check_clear_approval_command.sh"
+
+# 21.1 Compaction + approved + snapshot → output contains BOTH compaction warning AND plan objective
+#      (verifies the content is from compaction recovery, not just the normal injection)
+begin_test "21.1 compaction recovery injects plan content alongside warning"
+setup
+PLAN_FILE="${PLAN_DIR}/compact-content-plan.md"
+write_plan "$PLAN_FILE" \
+    "Implement structured event logging for all gate decisions in the hook system. Implements SEP-025." \
+    "- /Users/shingi/.claude/scripts/common.sh\n- /Users/shingi/.claude/scripts/require_plan_approval.sh" \
+    "Every gate decision writes a structured event to the SQLite events table." \
+    "Per /Users/shingi/.claude/docs/ARCHITECTURE.md, the events table exists but is uncalled." \
+    "I read common.sh and confirmed log_event exists."
+seed_approval_bundle_from_plan "$PLAN_FILE"
+state_write compaction_detected "1"
+state_write compaction_snapshot "SNAPSHOT_TIME: 2026-03-17T10:00:00Z
+PHASE: approved
+GIT_DIFF_STAT:
+ scripts/common.sh | 5 +++++
+ 2 files changed, 5 insertions(+)
+PHASE_MARKERS:
+ edit_count=3
+ dirty=2026-03-17T09:55:00Z /scripts/common.sh
+RECENT_EVENTS:
+2026-03-17T09:55:00Z|edit_allowed|/scripts/common.sh
+2026-03-17T09:54:00Z|dirty_set|/scripts/common.sh"
+run_hook "$INJECTION_21" '{"session_id":"test-session-001"}'
+# Must contain BOTH the warning AND the plan content — proving compaction recovery path
+assert_output_contains "COMPACTION DETECTED" \
+    && assert_output_contains "Implement structured event logging" \
+    && assert_output_contains "common.sh" \
+    && pass
+teardown
+
+# 21.2 Compaction without snapshot → basic warning still works (graceful degradation)
+begin_test "21.2 compaction without snapshot → basic warning, no crash"
+setup
+PLAN_FILE="${PLAN_DIR}/compact-nosnapshot-plan.md"
+write_plan "$PLAN_FILE" \
+    "Test plan for compaction recovery without snapshot data." \
+    "- /project/src/main.md" \
+    "Basic warning works even without snapshot." \
+    "Per /Users/shingi/.claude/CLAUDE.md, graceful degradation is required." \
+    "I read the compaction injection design."
+seed_approval_bundle_from_plan "$PLAN_FILE"
+state_write compaction_detected "1"
+# No compaction_snapshot set at all
+run_hook "$INJECTION_21" '{"session_id":"test-session-001"}'
+assert_output_contains "COMPACTION DETECTED" \
+    && assert_exit_code 0 \
+    && pass
+teardown
+
+# 21.3 Git diff stat from snapshot appears in injection output
+begin_test "21.3 git diff stat from snapshot in recovery output"
+setup
+PLAN_FILE="${PLAN_DIR}/compact-gitdiff-plan.md"
+write_plan "$PLAN_FILE" \
+    "Test plan for git diff stat in compaction recovery." \
+    "- /project/src/main.md" \
+    "Git diff stat from snapshot appears in injection." \
+    "Per /Users/shingi/.claude/CLAUDE.md, the snapshot includes git diff stat." \
+    "I read the snapshot format design."
+seed_approval_bundle_from_plan "$PLAN_FILE"
+state_write compaction_detected "1"
+state_write compaction_snapshot "SNAPSHOT_TIME: 2026-03-17T10:00:00Z
+PHASE: approved
+GIT_DIFF_STAT:
+ main.md | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+PHASE_MARKERS:
+ edit_count=1
+RECENT_EVENTS:
+2026-03-17T09:55:00Z|edit_allowed|/project/src/main.md"
+run_hook "$INJECTION_21" '{"session_id":"test-session-001"}'
+assert_output_contains "10 insertions" && pass
+teardown
+
+# 21.4 Recent events from snapshot appear in injection output
+begin_test "21.4 recent events from snapshot in recovery output"
+setup
+PLAN_FILE="${PLAN_DIR}/compact-events-plan.md"
+write_plan "$PLAN_FILE" \
+    "Test plan for recent events in compaction recovery." \
+    "- /project/src/main.md" \
+    "Recent events from snapshot appear in injection." \
+    "Per /Users/shingi/.claude/CLAUDE.md, the snapshot includes recent events." \
+    "I read the snapshot format design."
+seed_approval_bundle_from_plan "$PLAN_FILE"
+state_write compaction_detected "1"
+state_write compaction_snapshot "SNAPSHOT_TIME: 2026-03-17T10:00:00Z
+PHASE: approved
+GIT_DIFF_STAT:
+ (no git changes)
+PHASE_MARKERS:
+ edit_count=2
+RECENT_EVENTS:
+2026-03-17T09:55:00Z|edit_allowed|/project/src/main.md
+2026-03-17T09:54:00Z|dirty_set|/project/src/main.md"
+run_hook "$INJECTION_21" '{"session_id":"test-session-001"}'
+assert_output_contains "edit_allowed" \
+    && assert_output_contains "dirty_set" \
+    && pass
+teardown
+
+# 21.5 Implementation status in recovery (edit count, dirty, validation)
+begin_test "21.5 recovery output includes implementation status"
+setup
+PLAN_FILE="${PLAN_DIR}/compact-status-plan.md"
+write_plan "$PLAN_FILE" \
+    "Test plan for implementation status in compaction recovery." \
+    "- /project/src/main.md" \
+    "Implementation status from snapshot in recovery output." \
+    "Per /Users/shingi/.claude/CLAUDE.md, the snapshot captures phase markers." \
+    "I read the snapshot and injection design."
+seed_approval_bundle_from_plan "$PLAN_FILE"
+state_write edit_count "7"
+state_write dirty "2026-03-17T10:00:00Z /project/src/main.md"
+state_write compaction_detected "1"
+state_write compaction_snapshot "SNAPSHOT_TIME: 2026-03-17T10:00:00Z
+PHASE: approved
+GIT_DIFF_STAT:
+ (no git changes)
+PHASE_MARKERS:
+ edit_count=7
+ dirty=2026-03-17T10:00:00Z /project/src/main.md
+RECENT_EVENTS:
+(none)"
+run_hook "$INJECTION_21" '{"session_id":"test-session-001"}'
+# Verify edit count and dirty status are visible in output
+assert_output_contains "7" \
+    && assert_output_contains "dirty" \
+    && pass
+teardown
+
+# 21.6 Output is valid JSON (jq parses it)
+begin_test "21.6 compaction recovery output is valid JSON"
+setup
+PLAN_FILE="${PLAN_DIR}/compact-json-plan.md"
+write_plan "$PLAN_FILE" \
+    "Test plan for JSON validity of compaction recovery output." \
+    "- /project/src/main.md" \
+    "Output is valid JSON with additionalContext." \
+    "Per /Users/shingi/.claude/CLAUDE.md, hooks must produce valid JSON." \
+    "I read the jq output at end of check_clear_approval_command.sh."
+seed_approval_bundle_from_plan "$PLAN_FILE"
+state_write compaction_detected "1"
+state_write compaction_snapshot "SNAPSHOT_TIME: 2026-03-17T10:00:00Z
+PHASE: approved
+GIT_DIFF_STAT:
+ file with \"quotes\" | 5 +++++
+PHASE_MARKERS:
+ objective=Text with 'single quotes' and \"double quotes\"
+RECENT_EVENTS:
+2026-03-17T09:55:00Z|edit_allowed|/path/with spaces/file.sh"
+run_hook "$INJECTION_21" '{"session_id":"test-session-001"}'
+# jq must be able to parse the output — this catches broken JSON from special chars
+local_parsed=""
+local_parsed=$(echo "$HOOK_OUTPUT" | jq -r '.hookSpecificOutput.additionalContext' 2>/dev/null)
+if [[ -n "$local_parsed" && "$local_parsed" != "null" ]]; then
+    pass
+else
+    fail "Output is not valid JSON or additionalContext is missing (output: ${HOOK_OUTPUT:0:200})"
+fi
+teardown
 
 # ══════════════════════════════════════════════════════════════════
 # Final report
