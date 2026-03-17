@@ -325,7 +325,6 @@ state_write "validated" "npm test"
 state_write "tests_failed" "red"
 state_write "tests_reviewed" "1"
 state_write "edit_count" "5"
-state_write "diagnostic_mode" "1"
 # Write plan context keys (should survive)
 state_write "objective" "Build the widget"
 state_write "previous_objective" "Old task"
@@ -335,7 +334,7 @@ state_write "last_sep_ref" "SEP-006"
 clear_workflow_keys
 # Workflow keys should be gone
 WF_GONE=true
-for key in approved plan_file plan_hash dirty validated tests_failed tests_reviewed edit_count diagnostic_mode; do
+for key in approved plan_file plan_hash dirty validated tests_failed tests_reviewed edit_count; do
     if state_exists "$key"; then
         WF_GONE=false
         break

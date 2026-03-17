@@ -1374,27 +1374,108 @@ assert_json_field '.hookSpecificOutput.permissionDecision' 'deny' \
     && pass
 teardown
 
-# 12.9 Diagnostic mode NOT triggered when approved plan exists
-begin_test "12.9 Diagnostic mode skipped during active implementation"
+# 12.9 Diagnostic-sounding prompt passes through without blocking
+begin_test "12.9 Diagnostic-sounding prompt not blocked, gets epistemics reminder"
 setup
 CHECK_CMD="${SCRIPTS_DIR}/check_clear_approval_command.sh"
-state_write approved "1"
-# Simulate a diagnostic-sounding prompt during implementation
 DIAG_JSON=$(jq -n '{"session_id":"test-session-001","prompt":"why are my tests failing?"}')
 run_hook "$CHECK_CMD" "$DIAG_JSON"
-assert_state_not_exists "diagnostic_mode" "no diagnostic_mode during implementation" \
+assert_state_not_exists "diagnostic_mode" "no diagnostic_mode state set" \
+    && assert_output_contains "EPISTEMICS REMINDER" \
+    && assert_output_not_contains "INVESTIGATION" \
+    && assert_output_not_contains "block" \
+    && assert_exit_code 0 \
     && pass
 teardown
 
-# 12.10 Diagnostic mode still triggers when no approved plan exists
-begin_test "12.10 Diagnostic mode triggers without approved plan"
+# 12.10 Multiple diagnostic keywords don't trigger any special behavior
+begin_test "12.10 Multiple diagnostic keywords pass through normally"
 setup
 CHECK_CMD="${SCRIPTS_DIR}/check_clear_approval_command.sh"
-# No approved marker — diagnostic should trigger
-DIAG_JSON=$(jq -n '{"session_id":"test-session-001","prompt":"why are my tests failing?"}')
-run_hook "$CHECK_CMD" "$DIAG_JSON"
-assert_state_exists "diagnostic_mode" "diagnostic_mode set" \
+# Prompt with many old trigger words at once
+MULTI_JSON=$(jq -n '{"session_id":"test-session-001","prompt":"the server crashed with error 500 and the database connection is broken and timed out"}')
+run_hook "$CHECK_CMD" "$MULTI_JSON"
+assert_state_not_exists "diagnostic_mode" "no diagnostic_mode even with many trigger words" \
+    && assert_output_contains "EPISTEMICS REMINDER" \
+    && assert_output_not_contains "INVESTIGATION" \
+    && assert_exit_code 0 \
     && pass
+teardown
+
+# 12.10a Implementation request with diagnostic-sounding words passes through
+begin_test "12.10a Implementation request with diagnostic words not blocked"
+setup
+CHECK_CMD="${SCRIPTS_DIR}/check_clear_approval_command.sh"
+# This was the original false-positive case
+IMPL_JSON=$(jq -n '{"session_id":"test-session-001","prompt":"Make GPT-5 Mini Actually Fail on edge cases"}')
+run_hook "$CHECK_CMD" "$IMPL_JSON"
+assert_state_not_exists "diagnostic_mode" "no diagnostic_mode on implementation request" \
+    && assert_output_contains "EPISTEMICS REMINDER" \
+    && assert_output_not_contains "block" \
+    && assert_exit_code 0 \
+    && pass
+teardown
+
+# 12.10b /skip-investigation treated as normal prompt (no special handling)
+begin_test "12.10b /skip-investigation has no special effect"
+setup
+CHECK_CMD="${SCRIPTS_DIR}/check_clear_approval_command.sh"
+# Pre-set diagnostic_mode to prove it's not being cleared by /skip-investigation handler
+state_write "diagnostic_mode" "1"
+SKIP_JSON=$(jq -n '{"session_id":"test-session-001","prompt":"/skip-investigation"}')
+run_hook "$CHECK_CMD" "$SKIP_JSON"
+# After removal, /skip-investigation is just a normal prompt — it should NOT
+# specially remove diagnostic_mode or short-circuit with its own output
+assert_output_contains "EPISTEMICS REMINDER" \
+    && assert_exit_code 0 \
+    && pass
+teardown
+
+# 12.10c Pre-existing diagnostic_mode state doesn't inject continuation message
+begin_test "12.10c Stale diagnostic_mode state has no effect on output"
+setup
+CHECK_CMD="${SCRIPTS_DIR}/check_clear_approval_command.sh"
+# Simulate leftover state from before the removal
+state_write "diagnostic_mode" "1"
+NORMAL_JSON=$(jq -n '{"session_id":"test-session-001","prompt":"add a new feature"}')
+run_hook "$CHECK_CMD" "$NORMAL_JSON"
+assert_output_contains "EPISTEMICS REMINDER" \
+    && assert_output_not_contains "DIAGNOSTIC MODE STILL ACTIVE" \
+    && assert_output_not_contains "INVESTIGATION" \
+    && assert_exit_code 0 \
+    && pass
+teardown
+
+# 12.10d No diagnostic_mode or DIAGNOSTIC_PATTERN references in production script
+begin_test "12.10d No diagnostic code in check_clear_approval_command.sh"
+setup
+SCRIPT="${SCRIPTS_DIR}/check_clear_approval_command.sh"
+DIAG_REFS=$(grep -cE 'diagnostic_mode|DIAGNOSTIC_PATTERN|IS_DIAGNOSTIC|DIAGNOSTIC_DIRECTIVE|DIAGNOSTIC_CONTINUATION|skip-investigation' "$SCRIPT" || true)
+if [[ "$DIAG_REFS" -eq 0 ]]; then
+    pass
+else
+    fail "Found $DIAG_REFS diagnostic-related references in script"
+fi
+teardown
+
+# 12.10e No diagnostic_mode in common.sh clear_workflow_keys
+begin_test "12.10e diagnostic_mode removed from clear_workflow_keys"
+setup
+if grep -q 'diagnostic_mode' "${SCRIPTS_DIR}/common.sh"; then
+    fail "diagnostic_mode still referenced in common.sh"
+else
+    pass
+fi
+teardown
+
+# 12.10f require_investigation_plan.sh not registered in settings.json
+begin_test "12.10f require_investigation_plan.sh not in settings.json hooks"
+setup
+if grep -q 'require_investigation_plan' "${ORIGINAL_HOME}/.claude/settings.json"; then
+    fail "require_investigation_plan.sh still registered as hook"
+else
+    pass
+fi
 teardown
 
 # 12.11 Test file patterns: _test.go, .spec.ts, __tests__/ dir

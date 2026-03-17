@@ -214,7 +214,7 @@ clear_workflow_keys() {
         validate_pending validate_pending_hash
         accept_bypass_pending accept_bypass_pending_hash
         user_bypass user_bypass_hash
-        edit_count diagnostic_mode
+        edit_count
     )
     local where_clause=""
     for key in "${keys[@]}"; do

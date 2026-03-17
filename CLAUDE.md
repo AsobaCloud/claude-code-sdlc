@@ -112,39 +112,12 @@ When something doesn't work, DO NOT immediately jump to code changes:
 
 ---
 
-## Investigation Protocol - ENFORCED FOR DIAGNOSTIC QUESTIONS
+## Investigation Plans (Voluntary)
 
-When a user asks a diagnostic question (errors, failures, "what happened", "why is X broken",
-etc.), investigation mode activates automatically:
-
-1. First submission is **blocked** as a speed bump — re-submit to enter investigation mode
-2. All tools (Read, Grep, Glob, Bash, Task, WebFetch, WebSearch) are **blocked** until
-   you enter plan mode and get an investigation plan approved
-3. Only `EnterPlanMode` is available during the lockout
-
-### Investigation Plan Requirements
-
-Investigation plans use `## Hypothesis` instead of standard code-change sections:
-
-- `## Objective` — What you are investigating and why (≥10 words)
-- `## Hypothesis` — What might be wrong, with stated confidence levels (≥15 words)
-- `## Investigation Steps` — Specific checks to run: commands, files, logs (≥20 words)
-- `## Scope` — Systems, files, or logs to examine (no local file path requirement)
-- `## Success Criteria` — How to know the investigation is complete (≥10 words)
-- `## Validation` — What is known vs. assumed before investigating (≥20 words)
-
-**Not required** for investigation plans: ## Justification, SEP reference
-
-### Critical Rules
-
-- Do NOT make diagnostic claims before investigating
-- Do NOT offer "preliminary assessments" or reassurances
-- Every finding must cite specific evidence (file, log line, command output)
-- State confidence explicitly: "confirmed by X" vs "suspected based on Y"
-
-### Escape Hatch
-
-User types `/skip-investigation` to bypass investigation mode for any question.
+When investigating a diagnostic question, you may voluntarily write an investigation plan
+using `## Hypothesis` instead of `## Justification`. The plan validation system recognizes
+this format and relaxes the SEP reference requirement. This is a voluntary workflow choice,
+not mechanically enforced.
 
 ---
 

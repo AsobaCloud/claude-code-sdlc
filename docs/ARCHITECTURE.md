@@ -50,25 +50,9 @@ COMPLETED
 IDLE
 ```
 
-### Investigation workflow (diagnostic questions)
+### Investigation plans (voluntary)
 
-```
-IDLE
-  │ User asks diagnostic question
-  ▼
-DIAGNOSTIC (phase 1: blocked as speed bump)
-  │ User re-submits
-  ▼
-INVESTIGATION_PLANNING
-  │ Model writes investigation plan with ## Hypothesis
-  │ ExitPlanMode → relaxed validation
-  ▼
-INVESTIGATING
-  │ Tools unlocked, model investigates
-  │ Presents findings with evidence
-  ▼
-COMPLETED
-```
+The model may voluntarily write an investigation plan using `## Hypothesis` instead of `## Justification`. The plan validation system (`validate_plan_quality.sh`) recognizes this format and relaxes the SEP reference requirement. This is not mechanically enforced — no automatic detection or tool blocking occurs.
 
 ### Recovery paths
 
@@ -77,7 +61,6 @@ COMPLETED
 | `/approve` | Any | Rebuilds approval bundle from newest plan |
 | `/reject` | IMPLEMENTING+ | Clears all state, forces re-planning |
 | `/skip-tests` | TESTS_WRITTEN | Bypasses TDD gate entirely |
-| `/skip-investigation` | DIAGNOSTIC | Exits investigation mode |
 | `/accept` (twice) | VERIFIED (no proof) | User bypass of objective verification |
 
 ---
@@ -167,7 +150,6 @@ CREATE TABLE events (
 | `objective_verified_hash` | plan hash | Hash at verification time |
 | `objective_verified_edit_count` | decimal | Edit count at verification time |
 | `objective_verified_evidence` | command | Exact verification command |
-| `diagnostic_mode` | `"1"` | Investigation mode active |
 | `validate_pending` | description | Manual verification pending |
 | `validate_pending_hash` | plan hash | Hash when pending set |
 | `accept_bypass_pending` | timestamp | /accept blocked, awaiting retry |
@@ -179,7 +161,7 @@ CREATE TABLE events (
 
 No function may blanket-delete all state. Two selective clear functions replace the old `clear_all_state()`:
 
-- **`clear_workflow_keys()`** — removes workflow-lifecycle keys: `approved`, `plan_file`, `plan_hash`, `scope`, `criteria`, `objective_verification`, `objective_verification_required`, `planning`, `planning_started_at`, `dirty`, `validated`, `validation_log`, `validated_unit`, `validated_e2e`, `tests_failed`, `tests_reviewed`, `objective_verified`, `objective_verified_hash`, `objective_verified_edit_count`, `objective_verified_evidence`, `validate_pending`, `validate_pending_hash`, `accept_bypass_pending`, `accept_bypass_pending_hash`, `user_bypass`, `user_bypass_hash`, `edit_count`, `diagnostic_mode`. Does NOT remove plan context keys or `last_sep_ref`.
+- **`clear_workflow_keys()`** — removes workflow-lifecycle keys: `approved`, `plan_file`, `plan_hash`, `scope`, `criteria`, `objective_verification`, `objective_verification_required`, `planning`, `planning_started_at`, `dirty`, `validated`, `validation_log`, `validated_unit`, `validated_e2e`, `tests_failed`, `tests_reviewed`, `objective_verified`, `objective_verified_hash`, `objective_verified_edit_count`, `objective_verified_evidence`, `validate_pending`, `validate_pending_hash`, `accept_bypass_pending`, `accept_bypass_pending_hash`, `user_bypass`, `user_bypass_hash`, `edit_count`. Does NOT remove plan context keys or `last_sep_ref`.
 - **`clear_plan_context_keys()`** — removes `objective`, `previous_objective`, `previous_plan_file`. Used alongside `clear_workflow_keys` when fully resetting for a new task.
 
 ### Plan query helpers
@@ -254,12 +236,11 @@ Completed plans may be archived or deleted. No plan file persists indefinitely.
 
 | Script | Event | Tool matcher | Reads | Writes | Decision |
 |---|---|---|---|---|---|
-| `check_clear_approval_command.sh` | UserPromptSubmit | (all) | prompt, approved, planning, tests_failed, tests_reviewed, dirty, objective, scope, criteria, edit_count, diagnostic_mode | diagnostic_mode | allow with context |
+| `check_clear_approval_command.sh` | UserPromptSubmit | (all) | approved, planning, tests_failed, tests_reviewed, dirty, objective, scope, criteria, edit_count | (none) | allow with context |
 | `require_plan_approval.sh` | PreToolUse | Edit\|Write\|NotebookEdit | file_path, approved, plan_file, plan_hash, scope, objective_verification_required, objective_verification, tests_failed, tests_reviewed | edit_count (increment) | deny or allow with context |
 | `validate_plan_quality.sh` | PreToolUse | ExitPlanMode | plan file content, planning_started_at | approved, plan_file, plan_hash, objective, scope, criteria, objective_verification_required, objective_verification; clears planning, planning_started_at | deny or allow |
 | `guard_destructive_bash.sh` | PreToolUse | Bash | command | (none) | deny or exit 0 |
 | `sep_commit_check.sh` | PreToolUse | Bash | command (git commit) | (none) | deny or exit 0 |
-| `require_investigation_plan.sh` | PreToolUse | Read\|Grep\|Glob\|Bash\|Task\|WebFetch\|WebSearch | diagnostic_mode, planning, approved | (none) | deny or exit 0 |
 | `clear_plan_on_new_task.sh` | PostToolUse | EnterPlanMode | objective, plan_file | clears workflow keys + plan context keys; preserves previous_objective, previous_plan_file; sets planning, planning_started_at | exit 0 |
 | `approve_plan.sh` | PostToolUse | ExitPlanMode | approved, planning | clears planning, planning_started_at | exit 0 |
 | `track_dirty.sh` | PostToolUse | Edit\|Write\|NotebookEdit | file_path | dirty | exit 0 |
