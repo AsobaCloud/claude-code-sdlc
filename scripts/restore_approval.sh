@@ -6,7 +6,15 @@
 source "$(dirname "$0")/common.sh"
 init_persist_dir
 
-PLAN_FILE=$(resolve_plan_file_for_manual_approve)
+# Query plans table first, fall back to disk scan
+PLAN_FILE=""
+DB_PATH=$(db_query "SELECT file_path FROM plans WHERE conversation_id='$(sql_escape "$CONV_ID")' AND status='approved' ORDER BY id DESC LIMIT 1;")
+if [[ -n "$DB_PATH" && -f "$DB_PATH" ]] && ! plan_is_done "$DB_PATH"; then
+    PLAN_FILE="$DB_PATH"
+fi
+if [[ -z "$PLAN_FILE" ]]; then
+    PLAN_FILE=$(resolve_plan_file)
+fi
 if [[ -z "$PLAN_FILE" || ! -f "$PLAN_FILE" ]]; then
     state_remove approved
     echo "Approval restore failed for project (hash: ${PROJECT_HASH})."

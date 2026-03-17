@@ -198,8 +198,15 @@ if [[ -n "$SEP_REF" ]]; then
     LAST_SEP_REF="$SEP_REF"
 fi
 
-# Clear all conversation state
-clear_all_state
+# Update plans table: mark current plan as 'done'
+CURRENT_PLAN_ID=$(db_query "SELECT id FROM plans WHERE conversation_id='$(sql_escape "$CONV_ID")' AND status='approved' ORDER BY id DESC LIMIT 1;")
+if [[ -n "$CURRENT_PLAN_ID" ]]; then
+    update_plan_status "$CURRENT_PLAN_ID" "done"
+fi
+
+# Selective clear — remove workflow keys and plan context keys
+clear_workflow_keys
+clear_plan_context_keys
 
 # Restore last_sep_ref (persists across plan cycles)
 if [[ -n "$LAST_SEP_REF" ]]; then

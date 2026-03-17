@@ -7,7 +7,16 @@ init_hook
 
 # Ensure approval bundle is coherent (idempotent fallback for ExitPlanMode).
 if ! approval_bundle_is_complete; then
-    PLAN_FILE=$(resolve_plan_file)
+    PLAN_FILE=""
+    # Try plans table first for most recent approved plan
+    DB_PATH=$(db_query "SELECT file_path FROM plans WHERE conversation_id='$(sql_escape "$CONV_ID")' AND status='approved' ORDER BY id DESC LIMIT 1;")
+    if [[ -n "$DB_PATH" && -f "$DB_PATH" ]]; then
+        PLAN_FILE="$DB_PATH"
+    fi
+    # Fall back to disk scan
+    if [[ -z "$PLAN_FILE" ]]; then
+        PLAN_FILE=$(resolve_plan_file)
+    fi
     if [[ -n "$PLAN_FILE" && -f "$PLAN_FILE" ]]; then
         write_approval_bundle "$PLAN_FILE" || true
     fi

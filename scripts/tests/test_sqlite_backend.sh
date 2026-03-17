@@ -311,20 +311,84 @@ else
 fi
 teardown
 
-begin_test "3.7 clear_all_state removes all keys for conversation"
+begin_test "3.7 clear_workflow_keys removes workflow keys but not plan context keys"
 setup
 ensure_db
 CONV_ID="test-conv"
 db_exec "INSERT OR IGNORE INTO conversations (id, project_dir) VALUES ('$CONV_ID', '$(pwd)');"
-state_write "key1" "val1"
-state_write "key2" "val2"
-state_write "key3" "val3"
-clear_all_state
-REMAINING=$(db_query "SELECT COUNT(*) FROM state WHERE conversation_id='$CONV_ID';")
-if [[ "$REMAINING" == "0" ]]; then
+# Write workflow keys
+state_write "approved" "1"
+state_write "plan_file" "/tmp/plan.md"
+state_write "plan_hash" "abc123"
+state_write "dirty" "dirty"
+state_write "validated" "npm test"
+state_write "tests_failed" "red"
+state_write "tests_reviewed" "1"
+state_write "edit_count" "5"
+state_write "diagnostic_mode" "1"
+# Write plan context keys (should survive)
+state_write "objective" "Build the widget"
+state_write "previous_objective" "Old task"
+state_write "previous_plan_file" "/tmp/old-plan.md"
+# Write non-workflow key (should survive)
+state_write "last_sep_ref" "SEP-006"
+clear_workflow_keys
+# Workflow keys should be gone
+WF_GONE=true
+for key in approved plan_file plan_hash dirty validated tests_failed tests_reviewed edit_count diagnostic_mode; do
+    if state_exists "$key"; then
+        WF_GONE=false
+        break
+    fi
+done
+# Plan context keys should survive
+CTX_OK=true
+for key in objective previous_objective previous_plan_file; do
+    if ! state_exists "$key"; then
+        CTX_OK=false
+        break
+    fi
+done
+# Non-workflow key should survive
+SEP_OK=true
+if ! state_exists "last_sep_ref"; then
+    SEP_OK=false
+fi
+if $WF_GONE && $CTX_OK && $SEP_OK; then
     pass
 else
-    fail "Expected 0 remaining (got: $REMAINING)"
+    fail "workflow_gone=$WF_GONE ctx_ok=$CTX_OK sep_ok=$SEP_OK"
+fi
+teardown
+
+begin_test "3.8 clear_plan_context_keys removes context keys only"
+setup
+ensure_db
+CONV_ID="test-conv"
+db_exec "INSERT OR IGNORE INTO conversations (id, project_dir) VALUES ('$CONV_ID', '$(pwd)');"
+state_write "objective" "Build the widget"
+state_write "previous_objective" "Old task"
+state_write "previous_plan_file" "/tmp/old-plan.md"
+state_write "last_sep_ref" "SEP-006"
+state_write "approved" "1"
+clear_plan_context_keys
+# Context keys should be gone
+CTX_GONE=true
+for key in objective previous_objective previous_plan_file; do
+    if state_exists "$key"; then
+        CTX_GONE=false
+        break
+    fi
+done
+# Other keys should survive
+OTHERS_OK=true
+if ! state_exists "last_sep_ref" || ! state_exists "approved"; then
+    OTHERS_OK=false
+fi
+if $CTX_GONE && $OTHERS_OK; then
+    pass
+else
+    fail "ctx_gone=$CTX_GONE others_ok=$OTHERS_OK"
 fi
 teardown
 
@@ -353,23 +417,113 @@ else
 fi
 teardown
 
-begin_test "4.2 clear_all_state on A doesn't affect B"
+begin_test "4.2 clear_workflow_keys on A doesn't affect B"
 setup
 ensure_db
 db_exec "INSERT OR IGNORE INTO conversations (id, project_dir) VALUES ('conv-a', '$(pwd)');"
 db_exec "INSERT OR IGNORE INTO conversations (id, project_dir) VALUES ('conv-b', '$(pwd)');"
 CONV_ID="conv-a"
-state_write "key" "val-a"
+state_write "approved" "1"
+state_write "dirty" "dirty-a"
 CONV_ID="conv-b"
-state_write "key" "val-b"
+state_write "approved" "1"
+state_write "dirty" "dirty-b"
 CONV_ID="conv-a"
-clear_all_state
+clear_workflow_keys
 CONV_ID="conv-b"
-VAL=$(state_read "key")
-if [[ "$VAL" == "val-b" ]]; then
+VAL=$(state_read "approved")
+DIRTY=$(state_read "dirty")
+if [[ "$VAL" == "1" && "$DIRTY" == "dirty-b" ]]; then
     pass
 else
-    fail "B's state was affected (got: $VAL)"
+    fail "B's state was affected (approved=$VAL, dirty=$DIRTY)"
+fi
+teardown
+
+# ══════════════════════════════════════════════════════════════════
+# GROUP 4b: Plans table operations
+# ══════════════════════════════════════════════════════════════════
+printf "\n${YELLOW}── Group 4b: Plans table operations ──${NC}\n"
+
+begin_test "4b.1 save_plan + get_current_plan round-trip"
+setup
+ensure_db
+CONV_ID="test-conv"
+db_exec "INSERT OR IGNORE INTO conversations (id, project_dir) VALUES ('$CONV_ID', '$(pwd)');"
+save_plan "/tmp/my-plan.md" "# Plan content here" "approved"
+RESULT=$(get_current_plan)
+PLAN_PATH=$(echo "$RESULT" | cut -d'|' -f2)
+PLAN_CONTENT=$(echo "$RESULT" | cut -d'|' -f3)
+PLAN_STATUS=$(echo "$RESULT" | cut -d'|' -f4)
+if [[ "$PLAN_PATH" == "/tmp/my-plan.md" && "$PLAN_CONTENT" == "# Plan content here" && "$PLAN_STATUS" == "approved" ]]; then
+    pass
+else
+    fail "Round-trip failed (path=$PLAN_PATH, status=$PLAN_STATUS)"
+fi
+teardown
+
+begin_test "4b.2 get_previous_plan returns last approved/done plan, not draft"
+setup
+ensure_db
+CONV_ID="test-conv"
+db_exec "INSERT OR IGNORE INTO conversations (id, project_dir) VALUES ('$CONV_ID', '$(pwd)');"
+save_plan "/tmp/old-plan.md" "Old plan" "done"
+save_plan "/tmp/draft-plan.md" "Draft plan" "draft"
+RESULT=$(get_previous_plan)
+PLAN_PATH=$(echo "$RESULT" | cut -d'|' -f2)
+PLAN_STATUS=$(echo "$RESULT" | cut -d'|' -f4)
+if [[ "$PLAN_PATH" == "/tmp/old-plan.md" && "$PLAN_STATUS" == "done" ]]; then
+    pass
+else
+    fail "Expected old-plan.md/done (got path=$PLAN_PATH, status=$PLAN_STATUS)"
+fi
+teardown
+
+begin_test "4b.3 update_plan_status changes status and sets completed_at"
+setup
+ensure_db
+CONV_ID="test-conv"
+db_exec "INSERT OR IGNORE INTO conversations (id, project_dir) VALUES ('$CONV_ID', '$(pwd)');"
+save_plan "/tmp/plan.md" "Content" "approved"
+PLAN_ID=$(db_query "SELECT id FROM plans WHERE conversation_id='$CONV_ID' ORDER BY id DESC LIMIT 1;")
+update_plan_status "$PLAN_ID" "done"
+ROW=$(db_query "SELECT status, completed_at IS NOT NULL FROM plans WHERE id='$PLAN_ID';")
+if [[ "$ROW" == "done|1" ]]; then
+    pass
+else
+    fail "Expected done|1 (got: $ROW)"
+fi
+teardown
+
+begin_test "4b.4 get_current_plan returns most recent approved plan"
+setup
+ensure_db
+CONV_ID="test-conv"
+db_exec "INSERT OR IGNORE INTO conversations (id, project_dir) VALUES ('$CONV_ID', '$(pwd)');"
+save_plan "/tmp/plan-1.md" "First plan" "approved"
+save_plan "/tmp/plan-2.md" "Second plan" "approved"
+RESULT=$(get_current_plan)
+PLAN_PATH=$(echo "$RESULT" | cut -d'|' -f2)
+if [[ "$PLAN_PATH" == "/tmp/plan-2.md" ]]; then
+    pass
+else
+    fail "Expected plan-2.md (got: $PLAN_PATH)"
+fi
+teardown
+
+begin_test "4b.5 plans table is conversation-scoped"
+setup
+ensure_db
+db_exec "INSERT OR IGNORE INTO conversations (id, project_dir) VALUES ('conv-a', '$(pwd)');"
+db_exec "INSERT OR IGNORE INTO conversations (id, project_dir) VALUES ('conv-b', '$(pwd)');"
+CONV_ID="conv-a"
+save_plan "/tmp/plan-a.md" "Plan A" "approved"
+CONV_ID="conv-b"
+RESULT=$(get_current_plan)
+if [[ -z "$RESULT" ]]; then
+    pass
+else
+    fail "conv-b saw conv-a's plan (got: $RESULT)"
 fi
 teardown
 

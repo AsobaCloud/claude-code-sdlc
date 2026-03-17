@@ -20,6 +20,7 @@ if objective_verification_required_for_current_plan && ! objective_verified_for_
     exit 1
 fi
 
-clear_all_state
+clear_workflow_keys
+clear_plan_context_keys
 
 echo "Approval cleared for project (hash: ${PROJECT_HASH}). Claude must now plan before editing."

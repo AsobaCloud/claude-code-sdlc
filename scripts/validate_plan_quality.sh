@@ -293,7 +293,12 @@ if [[ -n "$ERRORS" ]]; then
 ${ERRORS}NEXT ACTION: Fix all issues above in your plan file, then call ExitPlanMode again."
 fi
 
-# ── All checks passed — create coherent approval bundle ──
+# ── All checks passed — save plan to SQLite, then create approval bundle ──
+PLAN_CONTENT_FOR_DB=$(cat "$PLAN_FILE" 2>/dev/null)
+if [[ -n "$PLAN_CONTENT_FOR_DB" ]]; then
+    save_plan "$PLAN_FILE" "$PLAN_CONTENT_FOR_DB" "approved"
+fi
+
 if ! write_approval_bundle "$PLAN_FILE"; then
     deny_tool "BLOCKED: Failed to persist approval metadata from plan.
 

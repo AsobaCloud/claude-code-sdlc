@@ -84,14 +84,11 @@ COMPLETED
 
 ## 3. State Storage Contract
 
-### Dual-mode backend (SEP-010)
+### SQLite backend (SEP-010, SEP-006)
 
-State storage uses a dual-mode backend in `common.sh`:
+All state is stored in a SQLite database at `~/.claude/workflow.db`. Tests override `HOME` to use a temporary database — no dual-mode or flat-file fallback exists.
 
-- **Test mode** (`CLAUDE_TEST_PERSIST_DIR` set): Flat files in temp directory — preserves backward compatibility with the entire test suite.
-- **Production mode**: SQLite database at `~/.claude/workflow.db` — eliminates path assembly bugs, silent failures, and non-atomic writes.
-
-The `state_read()`/`state_write()`/`state_exists()`/`state_remove()` API is identical in both modes. Scripts use these functions exclusively.
+The `state_read()`/`state_write()`/`state_exists()`/`state_remove()` API provides conversation-scoped key-value storage. Scripts use these functions exclusively.
 
 ### SQLite schema (`~/.claude/workflow.db`)
 
@@ -114,10 +111,22 @@ CREATE TABLE sessions (
 
 CREATE TABLE state (
     conversation_id TEXT NOT NULL,
-    key             TEXT NOT NULL,        -- same keys as the old flat files
+    key             TEXT NOT NULL,
     value           TEXT,
     updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (conversation_id, key)
+);
+
+CREATE TABLE plans (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    conversation_id TEXT NOT NULL,
+    file_path       TEXT,
+    content         TEXT NOT NULL,
+    hash            TEXT NOT NULL,
+    status          TEXT NOT NULL DEFAULT 'draft',
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    approved_at     TEXT,
+    completed_at    TEXT
 );
 
 CREATE TABLE events (
@@ -130,7 +139,7 @@ CREATE TABLE events (
 );
 ```
 
-### State keys (same in both modes)
+### State keys
 
 | Key | Value | Description |
 |---|---|---|
@@ -138,6 +147,8 @@ CREATE TABLE events (
 | `plan_file` | absolute path | Approved plan file |
 | `plan_hash` | SHA256 hex | Plan hash at approval time |
 | `objective` | text | Extracted from ## Objective |
+| `previous_objective` | text | Objective from prior plan cycle (compaction recovery) |
+| `previous_plan_file` | path | Plan file from prior plan cycle (compaction recovery) |
 | `scope` | newline-separated paths | Extracted from ## Scope |
 | `criteria` | text | Extracted from ## Success Criteria |
 | `objective_verification` | text | Extracted from ## Objective Verification |
@@ -164,17 +175,31 @@ CREATE TABLE events (
 | `user_bypass` | ISO8601 | User confirmed bypass |
 | `user_bypass_hash` | plan hash | Hash when bypass confirmed |
 
+### Selective clear functions
+
+No function may blanket-delete all state. Two selective clear functions replace the old `clear_all_state()`:
+
+- **`clear_workflow_keys()`** — removes workflow-lifecycle keys: `approved`, `plan_file`, `plan_hash`, `scope`, `criteria`, `objective_verification`, `objective_verification_required`, `planning`, `planning_started_at`, `dirty`, `validated`, `validation_log`, `validated_unit`, `validated_e2e`, `tests_failed`, `tests_reviewed`, `objective_verified`, `objective_verified_hash`, `objective_verified_edit_count`, `objective_verified_evidence`, `validate_pending`, `validate_pending_hash`, `accept_bypass_pending`, `accept_bypass_pending_hash`, `user_bypass`, `user_bypass_hash`, `edit_count`, `diagnostic_mode`. Does NOT remove plan context keys or `last_sep_ref`.
+- **`clear_plan_context_keys()`** — removes `objective`, `previous_objective`, `previous_plan_file`. Used alongside `clear_workflow_keys` when fully resetting for a new task.
+
+### Plan query helpers
+
+- `save_plan(file_path, content, status)` — INSERT into plans table with computed hash
+- `get_current_plan()` — SELECT most recent approved/draft plan for CONV_ID
+- `get_previous_plan()` — SELECT most recent approved/done plan for CONV_ID
+- `update_plan_status(plan_id, status)` — UPDATE status, set completed_at if 'done' or 'rejected'
+
 ### Invariants
 
-1. **Conversation isolation:** State written by conversation A MUST NOT be visible to conversation B. In production: enforced by `conversation_id` column. In test: enforced by `CLAUDE_TEST_PERSIST_DIR`.
-2. **Test override:** `CLAUDE_TEST_PERSIST_DIR` forces flat-file mode — the entire SQLite path is bypassed. All existing tests pass unchanged.
-3. **Single source of truth:** All state access MUST go through `state_read()`/`state_write()`. No script may use raw `${PERSIST_DIR}/filename` paths.
-4. **Atomic approval:** `write_approval_bundle()` clears `approved` first, writes all metadata, then sets `approved` last — preventing partial state.
-5. **Bulk cleanup:** `clear_all_state()` replaces individual `rm -f` lists. In SQLite mode this is a single `DELETE FROM state` — atomic and complete.
+1. **Conversation isolation:** State written by conversation A MUST NOT be visible to conversation B. Enforced by `conversation_id` column in all tables.
+2. **Single source of truth:** All state access MUST go through `state_read()`/`state_write()`. No script may use raw `${PERSIST_DIR}/filename` paths.
+3. **Atomic approval:** `write_approval_bundle()` clears `approved` first, writes all metadata, then sets `approved` last — preventing partial state.
+4. **No blanket deletes:** No function may execute an unscoped `DELETE FROM state`. All deletions use explicit key lists via `clear_workflow_keys()` and `clear_plan_context_keys()`.
+5. **Plan content in SQLite:** After approval, plan content is stored in the `plans` table. The disk file remains as the input source; SQLite is authoritative after approval.
 
 ### Conversation identity resolution (`init_persist_dir`)
 
-Production mode resolves `CONV_ID` with priority:
+Resolves `CONV_ID` with priority:
 
 1. `SESSION_ID` (from hook JSON) → look up `sessions` table; if not found, use `SESSION_ID` as `CONV_ID` directly (`INSERT OR IGNORE` into `conversations` and `sessions`)
 2. `CONVERSATION_TOKEN` env var or MEMORY.md token → use as conversation ID (`INSERT OR IGNORE` into `conversations`)
@@ -185,16 +210,15 @@ After resolution, the session is registered in `sessions` and `last_active` is u
 ### CONVERSATION_TOKEN
 
 - Generated via `openssl rand -hex 8`
-- Used as `conversations.id` in SQLite (production mode)
+- Used as `conversations.id` in SQLite
 - Stored in MEMORY.md under `## Conversation Token` (survives compaction)
 - Read by `read_conversation_token()` in `common.sh`
 
-### Additional state functions (SEP-010)
+### Additional state functions
 
 - `state_append(key, value)` — appends to existing value with newline separator (for `validation_log`)
-- `clear_all_state()` — removes all state for the current conversation (replaces bulk `rm -f` lists)
-- `counter_increment(key)` — atomic increment in SQLite mode via `ON CONFLICT DO UPDATE`
-- `log_event(type, detail)` — records events in the `events` table (production only)
+- `counter_increment(key)` — atomic increment via `ON CONFLICT DO UPDATE`
+- `log_event(type, detail)` — records events in the `events` table
 
 ---
 
@@ -202,12 +226,14 @@ After resolution, the session is registered in `sessions` and `last_active` is u
 
 ### Storage
 
-Plan files live in `~/.claude/plans/{CONVERSATION_TOKEN}/`. Each conversation has its own plan directory. `conversation_plan_dir()` in `common.sh` returns the correct path. `newest_plan_file()` only scans the calling conversation's plan directory.
+Plan files are written to disk by the model at `~/.claude/plans/{CONVERSATION_TOKEN}/`. Each conversation has its own plan directory. `conversation_plan_dir()` in `common.sh` returns the correct path.
 
-### Resolution order
+After approval, plan content is stored in the SQLite `plans` table via `save_plan()`. The disk file remains as the input source (the model writes drafts to disk via the Write tool); SQLite becomes authoritative after approval.
+
+### Resolution order (`resolve_plan_file`)
 
 1. **Explicit pointer** — `state_read plan_file` (set at approval time, conversation-scoped)
-2. **Active plan marker** — `~/.claude/.claude_active_plan` (project-wide, weaker)
+2. **Plans table** — query `plans` table for most recent approved plan for this conversation
 3. **Planning window** — `newest_plan_file(planning_started_at)` scoped to conversation's plan directory
 4. **Newest on disk** — `newest_plan_file(0)` scoped to conversation's plan directory (last resort)
 
@@ -216,6 +242,7 @@ Plan files live in `~/.claude/plans/{CONVERSATION_TOKEN}/`. Each conversation ha
 1. Plan files created by conversation A MUST NOT collide with conversation B.
 2. `plan_is_done()` plans (marked `**Status: DONE**`) are excluded from resolution.
 3. Plans older than 4 hours are rejected by `validate_plan_quality.sh`.
+4. After approval, plan content exists in both the disk file and the `plans` table.
 
 ### Cleanup
 
@@ -233,7 +260,7 @@ Completed plans may be archived or deleted. No plan file persists indefinitely.
 | `guard_destructive_bash.sh` | PreToolUse | Bash | command | (none) | deny or exit 0 |
 | `sep_commit_check.sh` | PreToolUse | Bash | command (git commit) | (none) | deny or exit 0 |
 | `require_investigation_plan.sh` | PreToolUse | Read\|Grep\|Glob\|Bash\|Task\|WebFetch\|WebSearch | diagnostic_mode, planning, approved | (none) | deny or exit 0 |
-| `clear_plan_on_new_task.sh` | PostToolUse | EnterPlanMode | (none) | clears ALL state; sets planning, planning_started_at | exit 0 |
+| `clear_plan_on_new_task.sh` | PostToolUse | EnterPlanMode | objective, plan_file | clears workflow keys + plan context keys; preserves previous_objective, previous_plan_file; sets planning, planning_started_at | exit 0 |
 | `approve_plan.sh` | PostToolUse | ExitPlanMode | approved, planning | clears planning, planning_started_at | exit 0 |
 | `track_dirty.sh` | PostToolUse | Edit\|Write\|NotebookEdit | file_path | dirty | exit 0 |
 | `track_validation.sh` | PostToolUse | Bash | command | validated_unit, validated_e2e, validated, validation_log; conditionally clears dirty, validated_unit, validated_e2e, tests_failed | allow with context |
@@ -244,9 +271,9 @@ Completed plans may be archived or deleted. No plan file persists indefinitely.
 | Script | Purpose | Key behavior |
 |---|---|---|
 | `restore_approval.sh` | `/approve` command | Rebuilds approval bundle from newest plan |
-| `accept_outcome.sh` | `/accept` command | Preflight check + finalize: marks plan DONE, updates MEMORY.md, clears state |
-| `reject_outcome.sh` | `/reject` command | Clears all state |
-| `clear_approval.sh` | Post-implementation | Blocks if dirty or objective unverified; clears all state |
+| `accept_outcome.sh` | `/accept` command | Preflight check + finalize: marks plan DONE in plans table, updates MEMORY.md, selective clear (workflow + context keys) |
+| `reject_outcome.sh` | `/reject` command | Marks plan 'rejected' in plans table, selective clear (workflow + context keys) |
+| `clear_approval.sh` | Post-implementation | Blocks if dirty or objective unverified; selective clear (workflow + context keys) |
 | `record_validation.sh` | Record proof | `--command`: records objective verification; `--manual`: records pending user verification |
 | `generate_token.sh` | `/new-token` command | Generates conversation token, writes to MEMORY.md |
 | `approve_tests.sh` | `/approve-tests` command | Sets tests_reviewed marker |
@@ -263,8 +290,8 @@ Completed plans may be archived or deleted. No plan file persists indefinitely.
 
 ### What is per-conversation (isolated)
 
-- State rows in `~/.claude/workflow.db` keyed by `conversation_id` (production)
-- PERSIST_DIR flat files (test mode only)
+- State rows in `~/.claude/workflow.db` keyed by `conversation_id`
+- Plan rows in `plans` table keyed by `conversation_id`
 - Plan files directory (`~/.claude/plans/{TOKEN}/`)
 - All approval state, validation state, edit count, dirty flags
 
@@ -294,9 +321,9 @@ When you change state storage logic (e.g., modifying `init_persist_dir` or `stat
 
 ### Rules
 
-1. **State survives path changes.** In production mode, state is in SQLite keyed by `conversation_id`, not file paths. Changing `PERSIST_DIR` computation does not lose state. If approval becomes invisible after a change, run `/approve` to rebuild it.
+1. **State survives path changes.** State is in SQLite keyed by `conversation_id`, not file paths. Changing `PERSIST_DIR` computation does not lose state. If approval becomes invisible after a change, run `/approve` to rebuild it.
 2. **Never compute PERSIST_DIR inline.** Always use `init_persist_dir()`. This ensures a single place to update.
-3. **Test with `CLAUDE_TEST_PERSIST_DIR`.** The test harness bypasses SQLite and uses flat files, so existing tests continue to work even when the production path changes.
+3. **Test with HOME override.** The test harness overrides `HOME` to use a temporary SQLite database. All tests exercise the real SQLite code path.
 4. **When editing hooks that enforce the workflow:** Be aware that the hooks are live. A syntax error in `require_plan_approval.sh` will block ALL subsequent edits. Keep a terminal open with `~/.claude/scripts/restore_approval.sh` ready.
 
 ---
@@ -307,7 +334,7 @@ When you change state storage logic (e.g., modifying `init_persist_dir` or `stat
 
 - CLAUDE.md (re-read from disk)
 - First 200 lines of MEMORY.md (including conversation token)
-- All state in `~/.claude/workflow.db` (production) or flat files in PERSIST_DIR (test mode)
+- All state in `~/.claude/workflow.db` (keyed by `conversation_id`)
 - This architecture document (if referenced from CLAUDE.md)
 
 ### What is lost
@@ -317,6 +344,13 @@ The model's in-context awareness of: current workflow phase, plan content, edit 
 ### Recovery mechanism
 
 The `UserPromptSubmit` hook (`check_clear_approval_command.sh`) injects a `── WORKFLOW STATE ──` block on every user message. This block reads persistent markers and reconstructs: current phase (APPROVED/PLANNING/IMPLEMENTING), objective, scope, plan file path, edit count, TDD phase, dirty/validation status.
+
+For the PLANNING phase, the injection is enriched with compaction recovery context:
+- **Previously working on:** the objective from the prior plan cycle (from `previous_objective` state key)
+- **Previous plan:** the plan file from the prior plan cycle (from `previous_plan_file` state key)
+- **Current draft:** path to any in-progress draft plan file (from disk scan)
+
+If the breadcrumb state keys are empty (e.g., after compaction erased them before they were written), the hook queries the `plans` table via `get_previous_plan()` for richer context.
 
 ### Decision tree for the model after compaction
 
@@ -335,8 +369,9 @@ Read the injected WORKFLOW STATE block — it tells you exactly where you are.
 │
 ├─ PLANNING:
 │   You are writing a plan.
-│   → Look for the newest plan file in the conversation's plan directory.
-│   → Continue writing it.
+│   → Check "Previously working on" for context on what you were doing.
+│   → Check "Current draft" for any in-progress plan file.
+│   → Continue writing the plan.
 │
 ├─ No workflow state:
 │   You are idle.
@@ -354,7 +389,7 @@ Read the injected WORKFLOW STATE block — it tells you exactly where you are.
 
 ### Correct behavior
 
-- **State isolation:** Each conversation's state is isolated by the `conversation_id` column in `~/.claude/workflow.db`. Approval, validation, edit count, dirty flags — all scoped to the conversation. No conversation can read or write another conversation's state. (In test mode, isolation is via separate `PERSIST_DIR` flat-file directories.)
+- **State isolation:** Each conversation's state is isolated by the `conversation_id` column in `~/.claude/workflow.db`. Approval, validation, edit count, dirty flags, and plans — all scoped to the conversation. No conversation can read or write another conversation's state.
 - **Plan file isolation:** Each conversation writes plans to `~/.claude/plans/{TOKEN}/`. Plan resolution functions (`newest_plan_file()`, `resolve_plan_file()`) only scan the conversation's own subdirectory.
 - **Token storage:** MEMORY.md holds the most recent token as a convenience for compaction recovery. In production mode, the `sessions` table provides authoritative session → conversation mapping, making MEMORY.md a backup only.
 - **Invariant:** Two conversations MAY both be in active planning or editing phases simultaneously without interference. Neither conversation's hooks, state, or plan files affect the other.
@@ -455,16 +490,17 @@ If you attempt the same action 3 times and it fails, STOP. Report what you tried
 
 ## 11. Implementation Status
 
-Items where the code does not yet match this contract:
-
 | Contract requirement | Current state | Tracking |
 |---|---|---|
 | Plan files in `~/.claude/plans/{TOKEN}/` | Implemented via `conversation_plan_dir()` | SEP-004 ✅ |
 | `newest_plan_file()` scoped to conversation | Scans only `conversation_plan_dir()` | SEP-004 ✅ |
 | `SESSION_ID` as primary token source | `init_persist_dir()` prefers SESSION_ID from hook JSON | SEP-004 ✅ |
-| Dead `approval_token` writes removed | Cleaned from `approve_plan.sh`, `validate_plan_quality.sh`, `clear_plan_on_new_task.sh` | SEP-004 ✅ |
-| SQLite state backend | Dual-mode: SQLite in production, flat files in test | SEP-010 ✅ |
-| `state_append` / `clear_all_state` | Implemented in `common.sh` | SEP-010 ✅ |
+| SQLite-only state backend | All state in SQLite; tests override HOME for temp DB | SEP-010 ✅ |
+| `state_append` / selective clears | `clear_workflow_keys()` + `clear_plan_context_keys()` | SEP-006 ✅ |
+| `plans` table for plan content | Plan content stored in SQLite after approval | SEP-006 ✅ |
+| No blanket deletes | `clear_all_state()` removed; selective clears only | SEP-006 ✅ |
+| Enriched PLANNING injection | Previous objective + draft path in compaction recovery | SEP-006 ✅ |
+| Active plan marker removed | `write_active_plan_marker()` / `.claude_active_plan` eliminated | SEP-006 ✅ |
 | Conversation identity via `sessions` table | SESSION_ID → conversation lookup in SQLite | SEP-010 ✅ |
 | Stale conversation cleanup | `cleanup_stale_sessions.sh` deletes conversations inactive 7+ days | SEP-010 ✅ |
 | Orphaned plan file cleanup | 119+ orphaned plans, no cleanup mechanism | Needs design |

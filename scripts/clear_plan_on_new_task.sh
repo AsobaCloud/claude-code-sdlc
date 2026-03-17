@@ -4,8 +4,17 @@
 source "$(dirname "$0")/common.sh"
 init_hook
 
-# Clear all state from previous plan cycle
-clear_all_state
+# Preserve context breadcrumbs for compaction recovery
+prev_obj=$(state_read objective)
+prev_plan=$(state_read plan_file)
+
+# Selective clear — remove workflow keys, then plan context keys
+clear_workflow_keys
+clear_plan_context_keys
+
+# Write breadcrumbs for compaction recovery
+[[ -n "$prev_obj" ]] && state_write previous_objective "$prev_obj"
+[[ -n "$prev_plan" ]] && state_write previous_plan_file "$prev_plan"
 
 # Enter planning mode
 state_write planning "1"

@@ -68,9 +68,22 @@ CREATE TABLE IF NOT EXISTS events (
     detail          TEXT
 );
 
+CREATE TABLE IF NOT EXISTS plans (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    conversation_id TEXT NOT NULL,
+    file_path       TEXT,
+    content         TEXT NOT NULL,
+    hash            TEXT NOT NULL,
+    status          TEXT NOT NULL DEFAULT 'draft',
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    approved_at     TEXT,
+    completed_at    TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_sessions_conv ON sessions(conversation_id);
 CREATE INDEX IF NOT EXISTS idx_events_conv ON events(conversation_id);
 CREATE INDEX IF NOT EXISTS idx_conv_project ON conversations(project_dir);
+CREATE INDEX IF NOT EXISTS idx_plans_conv ON plans(conversation_id);
 SQL
     _DB_INITIALIZED=1
 }
@@ -190,8 +203,29 @@ state_append() {
     fi
 }
 
-clear_all_state() {
-    db_exec "DELETE FROM state WHERE conversation_id='$(sql_escape "$CONV_ID")';"
+clear_workflow_keys() {
+    local keys=(
+        approved plan_file plan_hash scope criteria
+        objective_verification objective_verification_required
+        planning planning_started_at
+        dirty validated validation_log validated_unit validated_e2e
+        tests_failed tests_reviewed
+        objective_verified objective_verified_hash objective_verified_edit_count objective_verified_evidence
+        validate_pending validate_pending_hash
+        accept_bypass_pending accept_bypass_pending_hash
+        user_bypass user_bypass_hash
+        edit_count diagnostic_mode
+    )
+    local where_clause=""
+    for key in "${keys[@]}"; do
+        [[ -n "$where_clause" ]] && where_clause+=","
+        where_clause+="'$(sql_escape "$key")'"
+    done
+    db_exec "DELETE FROM state WHERE conversation_id='$(sql_escape "$CONV_ID")' AND key IN ($where_clause);"
+}
+
+clear_plan_context_keys() {
+    db_exec "DELETE FROM state WHERE conversation_id='$(sql_escape "$CONV_ID")' AND key IN ('objective','previous_objective','previous_plan_file');"
 }
 
 counter_increment() {
@@ -203,6 +237,37 @@ counter_increment() {
 log_event() {
     local event_type="$1" detail="${2:-}"
     db_exec "INSERT INTO events (conversation_id, session_id, event_type, detail) VALUES ('$(sql_escape "${CONV_ID:-}")', '$(sql_escape "${SESSION_ID:-}")', '$(sql_escape "$event_type")', '$(sql_escape "$detail")');"
+}
+
+# ── Plan query helpers (plans table) ──
+save_plan() {
+    local file_path="$1" content="$2" status="$3"
+    local hash
+    hash=$(printf '%s' "$content" | shasum -a 256 | awk '{print $1}')
+    local approved_at=""
+    [[ "$status" == "approved" ]] && approved_at="datetime('now')"
+    if [[ -n "$approved_at" ]]; then
+        db_exec "INSERT INTO plans (conversation_id, file_path, content, hash, status, approved_at) VALUES ('$(sql_escape "$CONV_ID")', '$(sql_escape "$file_path")', '$(sql_escape "$content")', '$(sql_escape "$hash")', '$(sql_escape "$status")', datetime('now'));"
+    else
+        db_exec "INSERT INTO plans (conversation_id, file_path, content, hash, status) VALUES ('$(sql_escape "$CONV_ID")', '$(sql_escape "$file_path")', '$(sql_escape "$content")', '$(sql_escape "$hash")', '$(sql_escape "$status")');"
+    fi
+}
+
+get_current_plan() {
+    db_query "SELECT id, file_path, content, status FROM plans WHERE conversation_id='$(sql_escape "$CONV_ID")' AND status IN ('approved','draft') ORDER BY id DESC LIMIT 1;"
+}
+
+get_previous_plan() {
+    db_query "SELECT id, file_path, content, status FROM plans WHERE conversation_id='$(sql_escape "$CONV_ID")' AND status IN ('approved','done') ORDER BY id DESC LIMIT 1;"
+}
+
+update_plan_status() {
+    local plan_id="$1" new_status="$2"
+    if [[ "$new_status" == "done" || "$new_status" == "rejected" ]]; then
+        db_exec "UPDATE plans SET status='$(sql_escape "$new_status")', completed_at=datetime('now') WHERE id='$(sql_escape "$plan_id")';"
+    else
+        db_exec "UPDATE plans SET status='$(sql_escape "$new_status")' WHERE id='$(sql_escape "$plan_id")';"
+    fi
 }
 
 # Legacy aliases — scripts that call persist_* still work
@@ -268,22 +333,6 @@ newest_plan_file() {
     [[ -n "$plan_file" ]] && echo "$plan_file"
 }
 
-active_plan_path_from_marker() {
-    local marker plan_file
-
-    for marker in "${HOME}/.claude/.claude_active_plan" "${HOME}/.claude_active_plan"; do
-        [[ ! -f "$marker" ]] && continue
-        plan_file=$(grep -E '^plan_file:' "$marker" | head -1 | sed 's/^plan_file:[[:space:]]*//')
-        plan_file=$(normalize_plan_path "$plan_file")
-        if [[ -n "$plan_file" && -f "$plan_file" ]]; then
-            echo "$plan_file"
-            return 0
-        fi
-    done
-
-    return 1
-}
-
 resolve_plan_file() {
     local plan_file planning_started
 
@@ -294,11 +343,15 @@ resolve_plan_file() {
         return 0
     fi
 
-    # 2) active plan marker
-    plan_file=$(active_plan_path_from_marker)
-    if [[ -n "$plan_file" && -f "$plan_file" ]] && ! plan_is_done "$plan_file"; then
-        echo "$plan_file"
-        return 0
+    # 2) plans table: most recent approved plan for this conversation
+    local db_path
+    db_path=$(db_query "SELECT file_path FROM plans WHERE conversation_id='$(sql_escape "$CONV_ID")' AND status='approved' ORDER BY id DESC LIMIT 1;")
+    if [[ -n "$db_path" ]]; then
+        db_path=$(normalize_plan_path "$db_path")
+        if [[ -f "$db_path" ]] && ! plan_is_done "$db_path"; then
+            echo "$db_path"
+            return 0
+        fi
     fi
 
     # 3) planning window candidate (new plan created since EnterPlanMode)
@@ -311,48 +364,9 @@ resolve_plan_file() {
         fi
     fi
 
-    # 4) last-resort newest plan
+    # 4) last-resort newest plan on disk
     plan_file=$(newest_plan_file 0)
     if [[ -n "$plan_file" ]]; then
-        echo "$plan_file"
-        return 0
-    fi
-
-    return 1
-}
-
-resolve_plan_file_for_manual_approve() {
-    local plan_file planning_started
-
-    # 1) Check existing plan_file state marker first (set by previous approval).
-    # When /approve is called in a new conversation, this marker points to the
-    # correct plan from the previous session — don't override with mtime guess.
-    plan_file=$(normalize_plan_path "$(state_read plan_file)")
-    if [[ -n "$plan_file" && -f "$plan_file" ]] && ! plan_is_done "$plan_file"; then
-        echo "$plan_file"
-        return 0
-    fi
-
-    # 2) Prefer a plan created during the current planning window when available.
-    planning_started=$(state_read planning_started_at)
-    if [[ "$planning_started" =~ ^[0-9]+$ && "$planning_started" -gt 0 ]]; then
-        plan_file=$(newest_plan_file "$planning_started")
-        if [[ -n "$plan_file" ]]; then
-            echo "$plan_file"
-            return 0
-        fi
-    fi
-
-    # Then use the newest plan on disk (authoritative for /approve).
-    plan_file=$(newest_plan_file 0)
-    if [[ -n "$plan_file" ]]; then
-        echo "$plan_file"
-        return 0
-    fi
-
-    # Fallback to active marker if no plan files are discoverable.
-    plan_file=$(active_plan_path_from_marker)
-    if [[ -n "$plan_file" && -f "$plan_file" ]]; then
         echo "$plan_file"
         return 0
     fi
@@ -434,20 +448,6 @@ plan_requires_objective_verification() {
     return 1
 }
 
-write_active_plan_marker() {
-    local plan_file="$1"
-    local plan_hash="$2"
-    local marker="${HOME}/.claude/.claude_active_plan"
-
-    mkdir -p "${HOME}/.claude"
-    cat > "$marker" <<EOF
-plan_file: $plan_file
-plan_hash: $plan_hash
-approved_at: $(date -Iseconds)
-project_hash: ${PROJECT_HASH}
-EOF
-}
-
 write_approval_bundle() {
     local plan_file="$1"
     local plan_hash objective scope criteria objective_verification objective_verification_required
@@ -477,7 +477,6 @@ write_approval_bundle() {
     state_write objective_verification_required "$objective_verification_required"
     state_write objective_verification "$objective_verification"
     state_write approved "1"
-    write_active_plan_marker "$plan_file" "$plan_hash" || true
 
     return 0
 }

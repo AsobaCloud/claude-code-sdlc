@@ -432,12 +432,13 @@ printf "\n${YELLOW}── Group 4: clear_plan_on_new_task.sh ──${NC}\n"
 
 CLEAR_TASK="${SCRIPTS_DIR}/clear_plan_on_new_task.sh"
 
-begin_test "4.1 clear_plan_on_new_task clears approval and validation markers"
+begin_test "4.1 clear_plan_on_new_task clears workflow markers and preserves previous objective"
 setup
 state_write approved "1"
-state_write objective "obj"
+state_write objective "Build the widget"
 state_write scope "sc"
 state_write criteria "cr"
+state_write plan_file "/tmp/old-plan.md"
 state_write objective_verification_required "1"
 state_write objective_verification "verify"
 state_write objective_verified "ts"
@@ -451,13 +452,13 @@ state_write tests_failed "red"
 state_write tests_reviewed "1"
 run_hook "$CLEAR_TASK" "$(json_posttooluse EnterPlanMode)"
 assert_state_not_exists "approved" \
-    && assert_state_not_exists "objective_verification_required" \
-    && assert_state_not_exists "objective_verified" \
-    && assert_state_not_exists "accept_bypass_pending" \
-    && assert_state_not_exists "user_bypass" \
     && assert_state_not_exists "dirty" \
     && assert_state_not_exists "validated_unit" \
     && assert_state_not_exists "tests_failed" \
+    && assert_state_exists "previous_objective" \
+    && assert_state_contains "previous_objective" "Build the widget" \
+    && assert_state_exists "previous_plan_file" \
+    && assert_state_contains "previous_plan_file" "/tmp/old-plan.md" \
     && pass
 teardown
 
@@ -530,38 +531,51 @@ assert_exit_code 0 \
     && pass
 teardown
 
-begin_test "6.2 accept_outcome.sh --finalize clears approval"
+begin_test "6.2 accept_outcome.sh --finalize clears workflow and context keys"
 setup
 state_write approved "1"
 state_write objective "obj"
+state_write scope "sc"
 state_write objective_verification_required "0"
+state_write last_sep_ref "SEP-006"
 run_script bash "${SCRIPTS_DIR}/accept_outcome.sh" --finalize
 assert_exit_code 0 \
     && assert_state_not_exists "approved" \
     && assert_state_not_exists "objective" \
+    && assert_state_not_exists "scope" \
+    && assert_state_exists "last_sep_ref" \
     && pass
 teardown
 
-begin_test "6.3 reject_outcome.sh clears approval"
+begin_test "6.3 reject_outcome.sh clears workflow and context keys"
 setup
 state_write approved "1"
 state_write scope "sc"
+state_write objective "obj"
+state_write dirty "dirty"
+state_write last_sep_ref "SEP-006"
 run_script bash "${SCRIPTS_DIR}/reject_outcome.sh"
 assert_exit_code 0 \
     && assert_state_not_exists "approved" \
     && assert_state_not_exists "scope" \
+    && assert_state_not_exists "objective" \
+    && assert_state_exists "last_sep_ref" \
     && pass
 teardown
 
-begin_test "6.4 clear_approval.sh clears all state"
+begin_test "6.4 clear_approval.sh clears workflow and context keys"
 setup
 state_write approved "1"
 state_write criteria "crit"
+state_write objective "obj"
 state_write objective_verification_required "0"
+state_write last_sep_ref "SEP-006"
 run_script bash "${SCRIPTS_DIR}/clear_approval.sh"
 assert_exit_code 0 \
     && assert_state_not_exists "approved" \
     && assert_state_not_exists "criteria" \
+    && assert_state_not_exists "objective" \
+    && assert_state_exists "last_sep_ref" \
     && pass
 teardown
 
@@ -1172,27 +1186,31 @@ fi
 teardown
 
 # 11.13 clear_approval.sh and accept_outcome.sh clean up tier markers
-begin_test "11.13 clear_approval.sh cleans up tier markers"
+begin_test "11.13 clear_approval.sh cleans up tier markers but preserves last_sep_ref"
 setup
 state_write validated_unit "npm test"
 state_write validated_e2e "npx cypress run"
 state_write approved "1"
 state_write objective_verification_required "0"
+state_write last_sep_ref "SEP-006"
 run_script bash "${SCRIPTS_DIR}/clear_approval.sh"
 assert_state_not_exists "validated_unit" "validated_unit cleaned" \
     && assert_state_not_exists "validated_e2e" "validated_e2e cleaned" \
+    && assert_state_exists "last_sep_ref" "last_sep_ref preserved" \
     && pass
 teardown
 
-begin_test "11.14 accept_outcome.sh cleans up tier markers"
+begin_test "11.14 accept_outcome.sh cleans up tier markers but preserves last_sep_ref"
 setup
 state_write validated_unit "npm test"
 state_write validated_e2e "npx cypress run"
 state_write approved "1"
 state_write objective_verification_required "0"
+state_write last_sep_ref "SEP-006"
 run_script bash "${SCRIPTS_DIR}/accept_outcome.sh" --finalize
 assert_state_not_exists "validated_unit" "validated_unit cleaned" \
     && assert_state_not_exists "validated_e2e" "validated_e2e cleaned" \
+    && assert_state_exists "last_sep_ref" "last_sep_ref preserved" \
     && pass
 teardown
 
@@ -1947,6 +1965,118 @@ else
     fail "Expected Session: and Plan dir: in workflow state (got: ${CONTEXT:0:400})"
 fi
 teardown
+
+# ══════════════════════════════════════════════════════════════════
+# GROUP 17: Enriched PLANNING injection and plans table (SEP-006)
+# ══════════════════════════════════════════════════════════════════
+printf "\n${YELLOW}── Group 17: Enriched PLANNING injection and plans table ──${NC}\n"
+
+CHECK_CMD_17="${SCRIPTS_DIR}/check_clear_approval_command.sh"
+CLEAR_TASK_17="${SCRIPTS_DIR}/clear_plan_on_new_task.sh"
+VALIDATE_17="${SCRIPTS_DIR}/validate_plan_quality.sh"
+NORMAL_PROMPT_17='{"session_id":"test-session-001","prompt":"continue"}'
+
+# 17.1 Full cycle: approve → EnterPlanMode → PLANNING injection includes previous objective
+begin_test "17.1 PLANNING injection includes previous objective after EnterPlanMode"
+setup
+# First approve a plan
+PLAN_FILE="${PLAN_DIR}/prev-plan.md"
+write_plan \
+    "$PLAN_FILE" \
+    "Implements SEP-006 by building the previous widget feature in the codebase." \
+    "- /tmp/widget.py" \
+    "Widget feature is built and tested." \
+    "Per /Users/shingi/.claude/CLAUDE.md, this follows the current approval workflow." \
+    "I read the current codebase and verified this plan is grounded."
+seed_approval_bundle_from_plan "$PLAN_FILE"
+# Now enter plan mode (new task)
+run_hook "$CLEAR_TASK_17" "$(json_posttooluse EnterPlanMode)"
+# Check PLANNING injection
+run_hook "$CHECK_CMD_17" "$NORMAL_PROMPT_17"
+CONTEXT=$(echo "$HOOK_OUTPUT" | jq -r '.hookSpecificOutput.additionalContext // empty')
+if echo "$CONTEXT" | grep -q "PLANNING" && echo "$CONTEXT" | grep -qi "previous.*widget\|previously.*widget"; then
+    pass
+else
+    fail "Expected PLANNING with previous objective mention (got: ${CONTEXT:0:400})"
+fi
+teardown
+
+# 17.2 PLANNING injection includes in-progress draft path
+begin_test "17.2 PLANNING injection includes draft path when one exists"
+setup
+state_write planning "1"
+state_write planning_started_at "$(date +%s)"
+# Create a draft plan file
+DRAFT_FILE="${PLAN_DIR}/draft-plan.md"
+mkdir -p "$PLAN_DIR"
+echo "## Objective" > "$DRAFT_FILE"
+echo "Draft plan in progress" >> "$DRAFT_FILE"
+run_hook "$CHECK_CMD_17" "$NORMAL_PROMPT_17"
+CONTEXT=$(echo "$HOOK_OUTPUT" | jq -r '.hookSpecificOutput.additionalContext // empty')
+if echo "$CONTEXT" | grep -q "PLANNING" && echo "$CONTEXT" | grep -q "draft-plan.md\|Current draft"; then
+    pass
+else
+    fail "Expected PLANNING with draft path (got: ${CONTEXT:0:400})"
+fi
+teardown
+
+# 17.3 /accept marks plan as 'done' in plans table
+begin_test "17.3 accept_outcome marks plan as done in plans table"
+setup
+PLAN_FILE="${PLAN_DIR}/accept-plan.md"
+write_plan \
+    "$PLAN_FILE" \
+    "Implements SEP-006 by testing acceptance marks plans done in the database." \
+    "- /tmp/test.txt" \
+    "Plan is marked done after acceptance." \
+    "Per /Users/shingi/.claude/CLAUDE.md, acceptance clears state." \
+    "I read the current accept script and verified it clears state."
+seed_approval_bundle_from_plan "$PLAN_FILE"
+state_write objective_verification_required "0"
+# Save plan to plans table (simulates what validate_plan_quality does)
+save_plan "$PLAN_FILE" "$(cat "$PLAN_FILE")" "approved"
+run_script bash "${SCRIPTS_DIR}/accept_outcome.sh" --finalize
+PLAN_STATUS=$(db_query "SELECT status FROM plans WHERE conversation_id='$(sql_escape "$CONV_ID")' AND status='done' LIMIT 1;")
+if [[ "$PLAN_STATUS" == "done" ]]; then
+    pass
+else
+    fail "Expected plan status 'done' (got: $PLAN_STATUS)"
+fi
+teardown
+
+# 17.4 /reject marks plan as 'rejected' in plans table
+begin_test "17.4 reject_outcome marks plan as rejected in plans table"
+setup
+PLAN_FILE="${PLAN_DIR}/reject-plan.md"
+write_plan \
+    "$PLAN_FILE" \
+    "Implements SEP-006 by testing rejection marks plans rejected in the database." \
+    "- /tmp/test.txt" \
+    "Plan is marked rejected after rejection." \
+    "Per /Users/shingi/.claude/CLAUDE.md, rejection clears state." \
+    "I read the current reject script and verified it clears state."
+seed_approval_bundle_from_plan "$PLAN_FILE"
+save_plan "$PLAN_FILE" "$(cat "$PLAN_FILE")" "approved"
+run_script bash "${SCRIPTS_DIR}/reject_outcome.sh"
+PLAN_STATUS=$(db_query "SELECT status FROM plans WHERE conversation_id='$(sql_escape "$CONV_ID")' AND status='rejected' LIMIT 1;")
+if [[ "$PLAN_STATUS" == "rejected" ]]; then
+    pass
+else
+    fail "Expected plan status 'rejected' (got: $PLAN_STATUS)"
+fi
+teardown
+
+# 17.5 clear_all_state function no longer exists
+begin_test "17.5 clear_all_state function removed from common.sh"
+TOTAL=$(( TOTAL + 1 ))
+if grep -q 'clear_all_state()' "${SCRIPTS_DIR}/common.sh"; then
+    FAILED=$(( FAILED + 1 ))
+    FAILURES+="  - 17.5: clear_all_state() still defined in common.sh\n"
+    printf "${RED}  FAIL${NC} 17.5: clear_all_state() still defined in common.sh\n"
+else
+    PASSED=$(( PASSED + 1 ))
+    printf "${GREEN}  PASS${NC} 17.5: clear_all_state() removed from common.sh\n"
+fi
 
 # ══════════════════════════════════════════════════════════════════
 # Final report

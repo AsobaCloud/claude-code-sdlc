@@ -215,6 +215,89 @@ else
 fi
 
 # ══════════════════════════════════════════════════════════════════════
+# Scenario 5: Plan content saved to plans table on approval
+# ══════════════════════════════════════════════════════════════════════
+printf "\n${YELLOW}Scenario 5: Plan content saved to plans table on approval${NC}\n"
+setup
+
+# Write plan to conversation-scoped dir so hook resolution finds it
+CONV_PLAN_DIR="$(conversation_plan_dir)"
+mkdir -p "$CONV_PLAN_DIR"
+PLAN_FILE="${CONV_PLAN_DIR}/test-plan-s5.md"
+cat > "$PLAN_FILE" <<'PLAN'
+# Test Plan
+
+## Objective
+
+Implements SEP-006 by testing that plan content is saved to the existing plans table on approval.
+
+## Scope
+
+- /Users/shingi/.claude/scripts/validate_plan_quality.sh
+- /Users/shingi/.claude/scripts/tests/test_approve_plan.sh
+
+## Success Criteria
+
+The plan content appears in the plans table with status=approved after ExitPlanMode.
+
+## Justification
+
+Per /Users/shingi/.claude/CLAUDE.md, this validates the current plan-to-SQLite storage path and follows existing patterns in scripts/.
+
+## Validation
+
+Sources consulted: validate_plan_quality.sh, common.sh, ARCHITECTURE.md.
+Evidence: save_plan call in validate_plan_quality.sh stores content after quality checks pass.
+Verified: plans table DDL exists in ensure_db. Found existing save_plan helper already implemented.
+Known gaps: none for this test.
+Per SQLite documentation (https://www.sqlite.org/lang_insert.html), INSERT with escaped values is the standard pattern.
+Per Claude Code hooks documentation (https://docs.anthropic.com/en/docs/claude-code/hooks), PreToolUse is the correct hook event for plan validation.
+
+## Objective Verification
+
+Run bash test_approve_plan.sh against the real test harness and confirm all scenarios pass including plans table storage.
+PLAN
+state_write planning "1"
+state_write planning_started_at "$(date +%s)"
+
+# Run validate_plan_quality (PreToolUse on ExitPlanMode) — this should save to plans table
+run_hook "${SCRIPTS_DIR}/validate_plan_quality.sh" "$(jq -n '{"session_id":"test-session-001","tool_name":"ExitPlanMode","tool_input":{}}')"
+
+# Verify plan content exists in plans table
+PLAN_ROW=$(db_query "SELECT file_path, status FROM plans WHERE conversation_id='$(sql_escape "$CONV_ID")' ORDER BY id DESC LIMIT 1;")
+TOTAL=$((TOTAL + 1))
+if [[ -n "$PLAN_ROW" ]]; then
+    PLAN_PATH=$(echo "$PLAN_ROW" | cut -d'|' -f1)
+    PLAN_STATUS=$(echo "$PLAN_ROW" | cut -d'|' -f2)
+    if [[ "$PLAN_STATUS" == "approved" && "$PLAN_PATH" == "$PLAN_FILE" ]]; then
+        PASSED=$((PASSED + 1))
+        printf "${GREEN}  PASS${NC}: Plan content saved to plans table with status=approved\n"
+    else
+        FAILED=$((FAILED + 1))
+        FAILURES="${FAILURES}\n  FAIL: Plan saved but wrong status/path (status=$PLAN_STATUS, path=$PLAN_PATH)"
+        printf "${RED}  FAIL${NC}: Plan saved but wrong status/path (status=$PLAN_STATUS, path=$PLAN_PATH)\n"
+    fi
+else
+    FAILED=$((FAILED + 1))
+    FAILURES="${FAILURES}\n  FAIL: No plan row found in plans table after approval"
+    printf "${RED}  FAIL${NC}: No plan row found in plans table after approval\n"
+fi
+
+# Verify plan content is non-empty
+PLAN_CONTENT_LEN=$(db_query "SELECT length(content) FROM plans WHERE conversation_id='$(sql_escape "$CONV_ID")' ORDER BY id DESC LIMIT 1;")
+TOTAL=$((TOTAL + 1))
+if [[ "$PLAN_CONTENT_LEN" -gt 50 ]]; then
+    PASSED=$((PASSED + 1))
+    printf "${GREEN}  PASS${NC}: Plan content stored (${PLAN_CONTENT_LEN} chars)\n"
+else
+    FAILED=$((FAILED + 1))
+    FAILURES="${FAILURES}\n  FAIL: Plan content too short or missing (length=$PLAN_CONTENT_LEN)"
+    printf "${RED}  FAIL${NC}: Plan content too short or missing (length=$PLAN_CONTENT_LEN)\n"
+fi
+
+teardown
+
+# ══════════════════════════════════════════════════════════════════════
 # Summary
 # ══════════════════════════════════════════════════════════════════════
 printf "\n${YELLOW}═══ Results ═══${NC}\n"

@@ -160,11 +160,42 @@ ${VALIDATION_STATUS}"
 Next: Continue implementing approved changes."
 
 elif state_exists planning; then
+    PREV_OBJ=$(state_read previous_objective)
+    PREV_PLAN=$(state_read previous_plan_file)
+    # If breadcrumb keys are empty, query plans table for richer context
+    if [[ -z "$PREV_OBJ" ]]; then
+        local prev_row
+        prev_row=$(get_previous_plan 2>/dev/null || true)
+        if [[ -n "$prev_row" ]]; then
+            PREV_PLAN=$(echo "$prev_row" | cut -d'|' -f2)
+            # Extract objective from stored plan content
+            local prev_content
+            prev_content=$(echo "$prev_row" | cut -d'|' -f3)
+            if [[ -n "$prev_content" ]]; then
+                PREV_OBJ=$(echo "$prev_content" | sed -n '/^##[[:space:]]*[Oo]bjective/,/^##/p' | tail -n +2 | grep -v '^## ' | sed '/^[[:space:]]*$/d' | head -1)
+            fi
+        fi
+    fi
+    # Find current draft if one exists
+    CURRENT_DRAFT=""
+    PLANNING_STARTED=$(state_read planning_started_at)
+    if [[ "$PLANNING_STARTED" =~ ^[0-9]+$ && "$PLANNING_STARTED" -gt 0 ]]; then
+        CURRENT_DRAFT=$(newest_plan_file "$PLANNING_STARTED" 2>/dev/null || true)
+    fi
+    [[ -z "$CURRENT_DRAFT" ]] && CURRENT_DRAFT=$(newest_plan_file 0 2>/dev/null || true)
+
     WORKFLOW_STATE="── WORKFLOW STATE ──
 Session: ${SESSION_ID:-unknown}
 Plan dir: $(conversation_plan_dir)
-Phase: PLANNING (plan mode active)
-Next: Write your plan to $(conversation_plan_dir)/<name>.md, then call ExitPlanMode to get it approved."
+Phase: PLANNING (plan mode active)"
+    [[ -n "$PREV_OBJ" ]] && WORKFLOW_STATE="${WORKFLOW_STATE}
+Previously working on: ${PREV_OBJ}"
+    [[ -n "$PREV_PLAN" ]] && WORKFLOW_STATE="${WORKFLOW_STATE}
+Previous plan: ${PREV_PLAN}"
+    [[ -n "$CURRENT_DRAFT" ]] && WORKFLOW_STATE="${WORKFLOW_STATE}
+Current draft: ${CURRENT_DRAFT}"
+    WORKFLOW_STATE="${WORKFLOW_STATE}
+Next: Write or continue your plan, then call ExitPlanMode."
 fi
 
 # Append workflow state to context if present
