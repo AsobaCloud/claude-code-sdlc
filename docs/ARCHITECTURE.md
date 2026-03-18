@@ -473,7 +473,49 @@ If you attempt the same action 3 times and it fails, STOP. Report what you tried
 
 ---
 
-## 11. Implementation Status
+## 11. TDD Subagent System (SEP-013)
+
+### Purpose
+
+The hook-based TDD gates (section 2) enforce **process**: tests must be written, must fail, must be reviewed before production code is editable. But they cannot enforce **epistemic isolation** — when test-writing and implementation happen in the same context window, the model designs tests around the implementation it's already planning.
+
+TDD subagents solve this by running each phase in an isolated context with restricted tool access:
+
+| Agent | Phase | Tools | Isolation |
+|---|---|---|---|
+| `tdd-test-writer` | A (Red) | Read, Write, Bash, Grep, Glob | No Edit — creates test files only, cannot see implementation plans |
+| `tdd-implementer` | B (Green) | Read, Edit, Write, Bash, Grep, Glob | Cannot modify test files, cannot see plans |
+| `tdd-refactorer` | C (Refactor) | Read, Edit, Bash, Grep, Glob | No Write — refactors existing files only |
+
+### Relationship to gate system
+
+The subagents work WITH the existing hooks, not around them:
+
+1. **Plan approval** — still required before any editing. The orchestrating context (main conversation) handles planning.
+2. **Test-writer writes tests** — test files are always allowed by `require_plan_approval.sh` (lines 119-125).
+3. **Test runner fails** — `track_test_failure.sh` sets `tests_failed` marker.
+4. **User reviews tests** — `/approve-tests` sets `tests_reviewed` marker.
+5. **Implementer edits production code** — gates are satisfied (`tests_failed` + `tests_reviewed` exist).
+6. **Validation** — `track_validation.sh` tracks unit and E2E test passing as normal.
+
+### When to use subagents vs. single-context TDD
+
+- **Use subagents** when epistemic isolation matters: new features, complex logic, cases where test design shouldn't be influenced by implementation knowledge.
+- **Use single-context** for bug fixes, small changes, or when the implementation is obvious from the test requirements.
+
+The subagents are optional — the standard single-context TDD workflow continues to work unchanged.
+
+### Invocation
+
+Agents are invoked via @-mention: `@tdd-test-writer`, `@tdd-implementer`, `@tdd-refactorer`. Each runs in its own context window with only the tools listed in its frontmatter.
+
+### Agent definitions
+
+Stored at `~/.claude/agents/tdd-{test-writer,implementer,refactorer}.md`. Each is a markdown file with YAML frontmatter specifying `name`, `description`, `tools`, and `model`.
+
+---
+
+## 12. Implementation Status
 
 | Contract requirement | Current state | Tracking |
 |---|---|---|
@@ -490,3 +532,4 @@ If you attempt the same action 3 times and it fails, STOP. Report what you tried
 | Stale conversation cleanup | `cleanup_stale_sessions.sh` deletes conversations inactive 7+ days | SEP-010 ✅ |
 | Orphaned plan file cleanup | 119+ orphaned plans, no cleanup mechanism | Needs design |
 | `PreCompact` hook for state snapshot | Not used | Optional enhancement |
+| TDD subagents for epistemic isolation | Agent definitions in `~/.claude/agents/` | SEP-013 ✅ |
