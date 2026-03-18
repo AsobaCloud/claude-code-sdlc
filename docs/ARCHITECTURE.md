@@ -183,9 +183,13 @@ No function may blanket-delete all state. Two selective clear functions replace 
 
 Resolves `CONV_ID` with priority:
 
-1. `SESSION_ID` (from hook JSON) → look up `sessions` table; if not found, use `SESSION_ID` as `CONV_ID` directly (`INSERT OR IGNORE` into `conversations` and `sessions`)
-2. `CONVERSATION_TOKEN` env var or MEMORY.md token → use as conversation ID (`INSERT OR IGNORE` into `conversations`)
-3. No token available → fall back to `"no-token"`
+1. `SESSION_ID` (from hook JSON) → look up `sessions` table → if found, use mapped `CONV_ID`
+2. `SESSION_ID` not found → check MEMORY.md token (via `CONVERSATION_TOKEN` env or `read_conversation_token()`) → if found, map session to that conversation
+3. `SESSION_ID` not found, no MEMORY.md token → use `SESSION_ID` as `CONV_ID` (new conversation)
+4. No `SESSION_ID` → `CONVERSATION_TOKEN` env var or MEMORY.md token → use as conversation ID
+5. No token available → fall back to `"no-token"`
+
+Step 2 is the compaction recovery path: when Claude Code assigns a new `session_id` after compaction, the old conversation's token in MEMORY.md allows the new session to map to the existing conversation, preserving all state.
 
 After resolution, the session is registered in `sessions` and `last_active` is updated.
 
@@ -282,7 +286,7 @@ Completed plans may be archived or deleted. No plan file persists indefinitely.
 
 ### Token resolution in `init_persist_dir()` (production mode)
 
-Resolution priority: (1) `SESSION_ID` → `sessions` table lookup, or use `SESSION_ID` directly if not found; (2) `CONVERSATION_TOKEN` env var or MEMORY.md token → use as conversation ID; (3) fall back to `"no-token"`. Using `sessions` table lookup as the primary source eliminates the MEMORY.md single-slot collision for all hook-based flows.
+Resolution priority: (1) `SESSION_ID` → `sessions` table lookup; (2) `SESSION_ID` not found → check MEMORY.md token → map session to that conversation (compaction recovery); (3) `SESSION_ID` not found, no MEMORY.md token → use `SESSION_ID` as `CONV_ID`; (4) no `SESSION_ID` → `CONVERSATION_TOKEN` env var or MEMORY.md token; (5) fall back to `"no-token"`. Step 2 ensures that after compaction (new `session_id`), the MEMORY.md token maps the new session to the existing conversation, preserving all state.
 
 ### Invariants
 

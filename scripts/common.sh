@@ -100,9 +100,17 @@ init_persist_dir() {
         # 1) SESSION_ID → sessions table lookup
         if [[ -n "${SESSION_ID:-}" ]]; then
             CONV_ID=$(db_query "SELECT conversation_id FROM sessions WHERE session_id='$(sql_escape "$SESSION_ID")';")
-            # If session not found, use SESSION_ID as the conversation identity
+            # If session not found, check MEMORY.md for existing conversation token
             if [[ -z "$CONV_ID" ]]; then
-                CONV_ID="$SESSION_ID"
+                local mem_token="${CONVERSATION_TOKEN:-}"
+                if [[ -z "$mem_token" ]]; then
+                    mem_token=$(read_conversation_token 2>/dev/null) || true
+                fi
+                if [[ -n "$mem_token" ]]; then
+                    CONV_ID="$mem_token"
+                else
+                    CONV_ID="$SESSION_ID"
+                fi
                 db_exec "INSERT OR IGNORE INTO conversations (id, project_dir) VALUES ('$(sql_escape "$CONV_ID")', '$(sql_escape "$(pwd)")');"
                 db_exec "INSERT OR IGNORE INTO sessions (session_id, conversation_id) VALUES ('$(sql_escape "$SESSION_ID")', '$(sql_escape "$CONV_ID")');"
             fi
@@ -215,6 +223,7 @@ clear_workflow_keys() {
         accept_bypass_pending accept_bypass_pending_hash
         user_bypass user_bypass_hash
         edit_count
+        compaction_detected compaction_snapshot
     )
     local where_clause=""
     for key in "${keys[@]}"; do

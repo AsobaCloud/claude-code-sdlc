@@ -128,11 +128,13 @@ else
 fi
 teardown
 
-begin_test "2.2 SESSION_ID NOT in sessions table → uses SESSION_ID as CONV_ID"
+begin_test "2.2 SESSION_ID NOT in sessions table, no MEMORY.md token → uses SESSION_ID as CONV_ID"
 setup
 ensure_db
 SESSION_ID="sess-new-123"
 CONV_ID=""
+CONVERSATION_TOKEN=""
+# No MEMORY.md token exists — should fall back to SESSION_ID as CONV_ID
 init_persist_dir
 if [[ "$CONV_ID" == "sess-new-123" ]]; then
     count=$(db_query "SELECT COUNT(*) FROM sessions WHERE session_id='sess-new-123';")
@@ -143,6 +145,37 @@ if [[ "$CONV_ID" == "sess-new-123" ]]; then
     fi
 else
     fail "Expected sess-new-123 (got: $CONV_ID)"
+fi
+teardown
+
+begin_test "2.2b SESSION_ID NOT in sessions table, MEMORY.md token exists → maps to MEMORY.md token"
+setup
+ensure_db
+SESSION_ID="sess-compacted-456"
+CONV_ID=""
+CONVERSATION_TOKEN=""
+# Write a MEMORY.md token (simulating a previous conversation that wrote it)
+PROJECT_KEY=$(pwd | tr '/' '-' | sed 's/^-//')
+MEM_DIR="${HOME}/.claude/projects/-${PROJECT_KEY}/memory"
+mkdir -p "$MEM_DIR"
+cat > "${MEM_DIR}/MEMORY.md" <<'EOF'
+# Memory
+
+## Conversation Token
+`mem-token-xyz`
+EOF
+db_exec "INSERT OR IGNORE INTO conversations (id, project_dir) VALUES ('mem-token-xyz', '$(pwd)');"
+init_persist_dir
+if [[ "$CONV_ID" == "mem-token-xyz" ]]; then
+    # Verify the session is mapped to the MEMORY.md token conversation
+    mapped_conv=$(db_query "SELECT conversation_id FROM sessions WHERE session_id='sess-compacted-456';")
+    if [[ "$mapped_conv" == "mem-token-xyz" ]]; then
+        pass
+    else
+        fail "Session mapped to wrong conversation (got: $mapped_conv)"
+    fi
+else
+    fail "Expected mem-token-xyz (got: $CONV_ID)"
 fi
 teardown
 
@@ -195,6 +228,51 @@ if [[ "$CONV_ID" == "no-token" ]]; then
     pass
 else
     fail "Expected no-token (got: $CONV_ID)"
+fi
+teardown
+
+begin_test "2.7 Multiple sessions with same MEMORY.md token → all map to same CONV_ID"
+setup
+ensure_db
+CONVERSATION_TOKEN=""
+# Write a MEMORY.md token
+PROJECT_KEY=$(pwd | tr '/' '-' | sed 's/^-//')
+MEM_DIR="${HOME}/.claude/projects/-${PROJECT_KEY}/memory"
+mkdir -p "$MEM_DIR"
+cat > "${MEM_DIR}/MEMORY.md" <<'EOF'
+# Memory
+
+## Conversation Token
+`shared-token-999`
+EOF
+db_exec "INSERT OR IGNORE INTO conversations (id, project_dir) VALUES ('shared-token-999', '$(pwd)');"
+# First session
+SESSION_ID="sess-first"
+CONV_ID=""
+init_persist_dir
+CONV1="$CONV_ID"
+# Second session (simulates compaction — new session_id, same MEMORY.md token)
+SESSION_ID="sess-second"
+CONV_ID=""
+_DB_INITIALIZED=""
+init_persist_dir
+CONV2="$CONV_ID"
+# Third session
+SESSION_ID="sess-third"
+CONV_ID=""
+_DB_INITIALIZED=""
+init_persist_dir
+CONV3="$CONV_ID"
+if [[ "$CONV1" == "shared-token-999" && "$CONV2" == "shared-token-999" && "$CONV3" == "shared-token-999" ]]; then
+    # Verify all three sessions are mapped to the same conversation
+    count=$(db_query "SELECT COUNT(*) FROM sessions WHERE conversation_id='shared-token-999';")
+    if [[ "$count" == "3" ]]; then
+        pass
+    else
+        fail "Expected 3 sessions mapped (got: $count)"
+    fi
+else
+    fail "Expected all shared-token-999 (got: $CONV1, $CONV2, $CONV3)"
 fi
 teardown
 
@@ -543,6 +621,104 @@ if [[ "$ROW" == "test-conv|plan_approved|test detail" ]]; then
     pass
 else
     fail "Expected test-conv|plan_approved|test detail (got: $ROW)"
+fi
+teardown
+
+# ══════════════════════════════════════════════════════════════════
+# GROUP 6: Conditional token generation on SessionStart (SEP-012)
+# ══════════════════════════════════════════════════════════════════
+printf "\n${YELLOW}── Group 6: Conditional token generation on SessionStart (SEP-012) ──${NC}\n"
+
+# Helper: write a token to MEMORY.md in the test HOME
+write_memory_token() {
+    local token="$1"
+    local mem_file
+    mem_file=$(resolve_memory_md)
+    mkdir -p "$(dirname "$mem_file")"
+    printf '\n## Conversation Token\n`%s`\n' "$token" >> "$mem_file"
+}
+
+# 6.1 SessionStart preserves existing MEMORY.md token
+begin_test "6.1 cleanup_stale_sessions.sh preserves existing MEMORY.md token"
+setup
+ensure_db
+write_memory_token "old-token-aaa"
+db_exec "INSERT OR IGNORE INTO conversations (id, project_dir) VALUES ('old-token-aaa', '$(pwd)');"
+# Run the actual script
+bash "${SCRIPTS_DIR}/cleanup_stale_sessions.sh" 2>/dev/null || true
+RESULT=$(read_conversation_token 2>/dev/null) || true
+if [[ "$RESULT" == "old-token-aaa" ]]; then
+    pass
+else
+    fail "Expected old-token-aaa (got: $RESULT)"
+fi
+teardown
+
+# 6.2 SessionStart generates token when MEMORY.md has none
+begin_test "6.2 cleanup_stale_sessions.sh generates token when MEMORY.md has none"
+setup
+ensure_db
+# MEMORY.md exists but has no token section
+mem_file=$(resolve_memory_md)
+mkdir -p "$(dirname "$mem_file")"
+echo "# Memory" > "$mem_file"
+bash "${SCRIPTS_DIR}/cleanup_stale_sessions.sh" 2>/dev/null || true
+RESULT=$(read_conversation_token 2>/dev/null) || true
+if [[ -n "$RESULT" && ${#RESULT} -eq 16 ]]; then
+    pass
+else
+    fail "Expected 16-char hex token (got: '$RESULT')"
+fi
+teardown
+
+# 6.3 SessionStart refreshes last_active for existing token
+begin_test "6.3 cleanup_stale_sessions.sh refreshes last_active for existing token"
+setup
+ensure_db
+write_memory_token "stale-token-bbb"
+db_exec "INSERT INTO conversations (id, project_dir, last_active) VALUES ('stale-token-bbb', '$(pwd)', datetime('now', '-5 days'));"
+bash "${SCRIPTS_DIR}/cleanup_stale_sessions.sh" 2>/dev/null || true
+RECENT=$(db_query "SELECT CASE WHEN last_active > datetime('now', '-1 minute') THEN 'yes' ELSE 'no' END FROM conversations WHERE id='stale-token-bbb';")
+if [[ "$RECENT" == "yes" ]]; then
+    pass
+else
+    LAST_ACTIVE=$(db_query "SELECT last_active FROM conversations WHERE id='stale-token-bbb';")
+    fail "Expected last_active refreshed (got: $LAST_ACTIVE)"
+fi
+teardown
+
+# 6.4 Standalone script finds state after session restart via cleanup_stale_sessions.sh
+begin_test "6.4 Standalone script finds state after session restart"
+setup
+ensure_db
+write_memory_token "persist-token-ccc"
+db_exec "INSERT OR IGNORE INTO conversations (id, project_dir) VALUES ('persist-token-ccc', '$(pwd)');"
+CONV_ID="persist-token-ccc"
+state_write approved "1"
+state_write plan_hash "test-hash"
+state_write scope "/tmp/test.txt"
+state_write objective "Test objective"
+state_write criteria "Test criteria"
+state_write plan_file "/tmp/test-plan.md"
+state_write objective_verification_required "1"
+# Simulate session restart by running the actual script
+bash "${SCRIPTS_DIR}/cleanup_stale_sessions.sh" 2>/dev/null || true
+# Clear identity (simulating standalone script environment)
+CONV_ID=""
+SESSION_ID=""
+CONVERSATION_TOKEN=""
+_DB_INITIALIZED=""
+# Re-resolve via init_persist_dir (like restore_approval.sh would)
+init_persist_dir
+if [[ "$CONV_ID" == "persist-token-ccc" ]]; then
+    APPROVED_VAL=$(state_read approved)
+    if [[ "$APPROVED_VAL" == "1" ]]; then
+        pass
+    else
+        fail "CONV_ID correct but approved state lost (got: '$APPROVED_VAL')"
+    fi
+else
+    fail "Expected CONV_ID=persist-token-ccc (got: $CONV_ID)"
 fi
 teardown
 
