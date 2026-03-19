@@ -22,3 +22,9 @@
 !plugins/plan-workflow/
 !plugins/plan-workflow/**
 !SDLC.md
+\!agents/
+\!agents/**
+\!skills/
+\!skills/**
+\!docs/
+\!docs/**

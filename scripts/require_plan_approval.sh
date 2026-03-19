@@ -26,6 +26,7 @@ if ! state_exists approved; then
     done
 
     PLAN_DIR=$(conversation_plan_dir)
+    log_event "edit_denied_no_plan" "$FILE_PATH"
     if [[ -n "$EXISTING_PLAN" ]]; then
         deny_tool "BLOCKED: No approved plan for this work.
 
@@ -96,7 +97,19 @@ while IFS= read -r SCOPE_PATH; do
     [[ "$FILE_PATH" == "$SCOPE_PATH" ]] && IN_SCOPE=true && break
 done <<< "$SCOPE_CONTENT"
 
+# Test files bypass scope (they're created during TDD, not known at plan time)
+# Doc files (.md, .mdx, .txt, .rst) under test dirs are not test files — they stay scope-enforced.
+if [[ "$IN_SCOPE" == "false" && ! "$FILE_PATH" =~ \.(md|mdx|txt|rst)$ ]]; then
+    if [[ "$FILE_PATH" =~ (^|/)test_[^/]*\.(py|sh)$ ]] || \
+       [[ "$FILE_PATH" =~ (^|/)[^/]*_test\.(py|go)$ ]] || \
+       [[ "$FILE_PATH" =~ (^|/)[^/]*\.(test|spec)\.(ts|js|tsx|jsx)$ ]] || \
+       [[ "$FILE_PATH" =~ (^|/)(tests|test|__tests__|spec)/ ]]; then
+        IN_SCOPE=true
+    fi
+fi
+
 if [[ "$IN_SCOPE" == "false" ]]; then
+    log_event "edit_denied_out_of_scope" "$FILE_PATH"
     deny_tool "BLOCKED: File not in approved scope.
 
 File: $FILE_PATH
@@ -129,6 +142,7 @@ fi
 
 if [[ "$IS_TEST_FILE" == "false" && "$IS_DOC_FILE" == "false" ]]; then
     if ! state_exists tests_failed; then
+        log_event "edit_denied_tdd_gate" "$FILE_PATH"
         deny_tool "TDD ENFORCEMENT: Tests must fail first.
 
 NEXT ACTION (3 steps in order):
@@ -137,6 +151,7 @@ NEXT ACTION (3 steps in order):
 3. They must EXIT NON-ZERO (fail). Only a non-zero exit unlocks production code editing."
     fi
     if ! state_exists tests_reviewed; then
+        log_event "edit_denied_test_review_gate" "$FILE_PATH"
         deny_tool "TEST REVIEW GATE: Present tests to user for review.
 
 Tests have been written and they fail (red phase complete). Before editing
@@ -151,6 +166,8 @@ WHAT TO DO NOW:
 Do NOT attempt to edit production code until the user responds."
     fi
 fi
+
+log_event "edit_allowed" "$FILE_PATH"
 
 # ── Context injection (every edit) ──
 EDIT_COUNT=$(counter_increment edit_count)

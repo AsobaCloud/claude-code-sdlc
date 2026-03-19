@@ -67,8 +67,13 @@ Scope: ${SCOPE}"
 Success criteria: ${CRITERIA}"
     [[ -n "$VALIDATION_STATUS" ]] && WORKFLOW_STATE="${WORKFLOW_STATE}
 ${VALIDATION_STATUS}"
-    WORKFLOW_STATE="${WORKFLOW_STATE}
+    if ! state_exists tests_failed; then
+        WORKFLOW_STATE="${WORKFLOW_STATE}
+Next: Invoke /tdd to begin TDD workflow."
+    else
+        WORKFLOW_STATE="${WORKFLOW_STATE}
 Next: Continue implementing approved changes."
+    fi
 
 elif state_exists planning; then
     PREV_OBJ=$(state_read previous_objective)
@@ -107,6 +112,72 @@ Previous plan: ${PREV_PLAN}"
 Current draft: ${CURRENT_DRAFT}"
     WORKFLOW_STATE="${WORKFLOW_STATE}
 Next: Write or continue your plan, then call ExitPlanMode."
+fi
+
+# ── Compaction detection and recovery (SEP-027, SEP-028) ──
+if state_exists compaction_detected; then
+    COMPACTION_RECOVERY="── COMPACTION DETECTED ──
+Context compaction occurred. Recovering workflow state from snapshot."
+
+    # Read snapshot data (SEP-028)
+    SNAPSHOT_DATA=$(state_read compaction_snapshot)
+    if [[ -n "$SNAPSHOT_DATA" ]]; then
+        COMPACTION_RECOVERY="${COMPACTION_RECOVERY}
+
+${SNAPSHOT_DATA}"
+    fi
+
+    # Read and inject condensed plan content (SEP-028)
+    RECOVERY_PLAN_FILE=$(state_read plan_file)
+    if [[ -n "$RECOVERY_PLAN_FILE" && -f "$RECOVERY_PLAN_FILE" ]]; then
+        PLAN_OBJECTIVE=$(extract_plan_objective "$RECOVERY_PLAN_FILE" | head -3)
+        PLAN_SCOPE=$(extract_plan_scope "$RECOVERY_PLAN_FILE")
+        PLAN_CRITERIA=$(extract_plan_criteria "$RECOVERY_PLAN_FILE" | head -3)
+        PLAN_OBJ_VERIFY=$(extract_plan_objective_verification "$RECOVERY_PLAN_FILE" | head -5)
+
+        COMPACTION_RECOVERY="${COMPACTION_RECOVERY}
+
+── PLAN CONTENT (condensed) ──
+Plan file: ${RECOVERY_PLAN_FILE}"
+        [[ -n "$PLAN_OBJECTIVE" ]] && COMPACTION_RECOVERY="${COMPACTION_RECOVERY}
+Objective: ${PLAN_OBJECTIVE}"
+        [[ -n "$PLAN_SCOPE" ]] && COMPACTION_RECOVERY="${COMPACTION_RECOVERY}
+Scope: ${PLAN_SCOPE}"
+        [[ -n "$PLAN_CRITERIA" ]] && COMPACTION_RECOVERY="${COMPACTION_RECOVERY}
+Success criteria: ${PLAN_CRITERIA}"
+        [[ -n "$PLAN_OBJ_VERIFY" ]] && COMPACTION_RECOVERY="${COMPACTION_RECOVERY}
+Objective verification: ${PLAN_OBJ_VERIFY}"
+    fi
+
+    # Determine phase for logging
+    COMPACTION_PHASE="idle"
+    if state_exists approved; then
+        COMPACTION_PHASE="approved"
+    elif state_exists planning; then
+        COMPACTION_PHASE="planning"
+    fi
+
+    # Prepend recovery block to workflow state
+    if [[ -n "$WORKFLOW_STATE" ]]; then
+        WORKFLOW_STATE="${COMPACTION_RECOVERY}
+
+${WORKFLOW_STATE}"
+    else
+        WORKFLOW_STATE="${COMPACTION_RECOVERY}"
+    fi
+
+    # Clear single-use flag and log
+    state_remove compaction_detected
+    log_event "state_injected_compaction_recovery" "phase=${COMPACTION_PHASE}"
+else
+    # Normal injection logging (SEP-025)
+    if state_exists approved; then
+        INJECT_PHASE="${PHASE:-APPROVED}"
+        INJECT_EDITS="${EDIT_COUNT:-0}"
+        log_event "state_injected_approved" "phase=${INJECT_PHASE} edits=${INJECT_EDITS}"
+    elif [[ -z "$WORKFLOW_STATE" ]]; then
+        log_event "state_injected_idle" ""
+    fi
 fi
 
 # Append workflow state to context if present

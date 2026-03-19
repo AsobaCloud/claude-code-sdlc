@@ -507,7 +507,19 @@ The subagents are optional — the standard single-context TDD workflow continue
 
 ### Invocation
 
-Agents are invoked via @-mention: `@tdd-test-writer`, `@tdd-implementer`, `@tdd-refactorer`. Each runs in its own context window with only the tools listed in its frontmatter.
+The `/tdd` skill (`~/.claude/skills/tdd/SKILL.md`) orchestrates the three-phase workflow. After plan approval, `approve_plan.sh` and `check_clear_approval_command.sh` direct the model to invoke `/tdd`. The skill:
+
+1. Extracts requirements from the approved plan (objective + success criteria only — no implementation details)
+2. Launches `tdd-test-writer` via the Agent tool with requirements only (epistemic isolation)
+3. Presents test results to user, waits for `/approve-tests`
+4. Launches `tdd-implementer` with test file paths and scope (no plan, no test-writing rationale)
+5. Optionally launches `tdd-refactorer`
+
+Each agent runs in its own context window with only the tools listed in its frontmatter.
+
+### Test file scope exemption
+
+Test files bypass scope enforcement in `require_plan_approval.sh`. This is necessary because test file names are not known at plan time — the test-writer agent creates them during the red phase. The same file patterns used by the TDD gate (lines 120-125) are checked before the scope denial, and matching files are allowed regardless of scope.
 
 ### Agent definitions
 
@@ -532,4 +544,4 @@ Stored at `~/.claude/agents/tdd-{test-writer,implementer,refactorer}.md`. Each i
 | Stale conversation cleanup | `cleanup_stale_sessions.sh` deletes conversations inactive 7+ days | SEP-010 ✅ |
 | Orphaned plan file cleanup | 119+ orphaned plans, no cleanup mechanism | Needs design |
 | `PreCompact` hook for state snapshot | Not used | Optional enhancement |
-| TDD subagents for epistemic isolation | Agent definitions in `~/.claude/agents/` | SEP-013 ✅ |
+| TDD subagents for epistemic isolation | Agent definitions + `/tdd` skill + test file scope exemption + hook directives | SEP-013 ✅ |
