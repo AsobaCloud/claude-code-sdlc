@@ -1882,8 +1882,11 @@ else
 fi
 teardown
 
-# 16.6 init_persist_dir uses SESSION_ID as primary token source
-begin_test "16.6 init_persist_dir prefers SESSION_ID over MEMORY.md token"
+# 16.6 init_persist_dir: MEMORY.md token wins over unknown SESSION_ID
+# Per ARCHITECTURE.md §3 lines 192-194: when SESSION_ID is not in the
+# sessions table, MEMORY.md token is used (compaction recovery path).
+# SESSION_ID is only used as CONV_ID when no MEMORY.md token exists.
+begin_test "16.6 init_persist_dir uses MEMORY.md token over unknown SESSION_ID (compaction recovery)"
 setup
 PROJECT_KEY=$(pwd | tr '/' '-' | sed 's/^-//')
 MEM_DIR="${HOME}/.claude/projects/-${PROJECT_KEY}/memory"
@@ -1892,28 +1895,31 @@ cat > "${MEM_DIR}/MEMORY.md" <<'MEMEOF'
 # Memory
 
 ## Conversation Token
-`memory-token-should-lose`
+`memory-token-should-win`
 MEMEOF
 DIR=$(
     CONV_ID=""
     CONVERSATION_TOKEN=""
     source "${SCRIPTS_DIR}/common.sh"
-    SESSION_ID="session-id-should-win"
+    SESSION_ID="session-id-should-lose"
     init_persist_dir
     echo "$PERSIST_DIR"
 ) 2>/dev/null
-if [[ "$DIR" == *"/session-id-should-win" ]]; then
+if [[ "$DIR" == *"/memory-token-should-win" ]]; then
     pass
 else
-    fail "Expected SESSION_ID in path (got: $DIR)"
+    fail "Expected MEMORY.md token in path (got: $DIR)"
 fi
 teardown
 
 # 16.7 init_persist_dir creates conversation plan directory
+# When SESSION_ID is new and no MEMORY.md token exists, SESSION_ID becomes
+# CONV_ID and the plan directory is created at ~/.claude/plans/<SESSION_ID>/
 begin_test "16.7 init_persist_dir creates conversation plan directory"
 setup
 (
     CONV_ID=""
+    CONVERSATION_TOKEN=""
     source "${SCRIPTS_DIR}/common.sh"
     SESSION_ID="plandir-test-token"
     init_persist_dir

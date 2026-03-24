@@ -17,7 +17,11 @@ if ! command -v jq &>/dev/null; then
 fi
 
 # ── SQLite helpers ──
-WORKFLOW_DB="${HOME}/.claude/workflow.db"
+if [[ -n "${CLAUDE_TEST_PERSIST_DIR:-}" ]]; then
+    WORKFLOW_DB="${CLAUDE_TEST_PERSIST_DIR}/workflow.db"
+else
+    WORKFLOW_DB="${HOME}/.claude/workflow.db"
+fi
 
 sql_escape() {
     printf '%s' "${1//\'/\'\'}"
@@ -96,6 +100,9 @@ init_persist_dir() {
     ensure_db
     PROJECT_HASH=$(pwd | shasum | cut -c1-12)
 
+    # Ensure CONV_ID is defined to avoid 'unbound variable' under 'set -u'
+    CONV_ID="${CONV_ID:-}"
+
     if [[ -z "${CONV_ID:-}" ]]; then
         # 1) SESSION_ID → sessions table lookup
         if [[ -n "${SESSION_ID:-}" ]]; then
@@ -148,7 +155,11 @@ init_persist_dir() {
 
     # Set globals for backward compat
     CONVERSATION_TOKEN="$CONV_ID"
-    PERSIST_DIR="${HOME}/.claude/state/${PROJECT_HASH}/${CONVERSATION_TOKEN}"
+    if [[ -n "${CLAUDE_TEST_PERSIST_DIR:-}" ]]; then
+        PERSIST_DIR="${CLAUDE_TEST_PERSIST_DIR}"
+    else
+        PERSIST_DIR="${HOME}/.claude/state/${PROJECT_HASH}/${CONVERSATION_TOKEN}"
+    fi
     mkdir -p "$PERSIST_DIR"
     mkdir -p "$(conversation_plan_dir)"
 }
@@ -189,7 +200,11 @@ state_exists() {
 }
 
 state_write() {
-    db_exec "INSERT OR REPLACE INTO state (conversation_id, key, value, updated_at) VALUES ('$(sql_escape "$CONV_ID")', '$(sql_escape "$1")', '$(sql_escape "$2")', datetime('now'));"
+    db_exec "INSERT OR REPLACE INTO state (conversation_id, key, value, updated_at) VALUES ('$(sql_escape "${CONV_ID:-}")', '$(sql_escape "$1")', '$(sql_escape "$2")', datetime('now'));"
+    # For test harness compatibility, also write a simple marker file in PERSIST_DIR
+    if [[ -n "${PERSIST_DIR:-}" ]]; then
+        printf '%s' "$2" > "${PERSIST_DIR}/$1"
+    fi
 }
 
 state_read() {
@@ -216,7 +231,7 @@ clear_workflow_keys() {
         approved plan_file plan_hash scope criteria
         objective_verification objective_verification_required
         planning planning_started_at
-        dirty validated validation_log validated_unit validated_e2e
+        dirty validated validation_log validated_unit validated_e2e validation_complete
         tests_failed tests_reviewed
         objective_verified objective_verified_hash objective_verified_edit_count objective_verified_evidence
         validate_pending validate_pending_hash
@@ -386,11 +401,21 @@ resolve_plan_file() {
 resolve_plan_file_for_exit_plan() {
     local plan_file planning_started
 
-    # If planning is active, only trust plans written during this planning window.
+    # If planning is active, check the SQLite plan_file pointer first, then scan.
     planning_started=$(state_read planning_started_at)
     if [[ "$planning_started" =~ ^[0-9]+$ && "$planning_started" -gt 0 ]]; then
+        # 1) SQLite pointer takes priority — prevents flip-flopping on retry
+        plan_file=$(normalize_plan_path "$(state_read plan_file)")
+        if [[ -n "$plan_file" && -f "$plan_file" ]] && ! plan_is_done "$plan_file"; then
+            echo "$plan_file"
+            return 0
+        fi
+
+        # 2) No valid pointer — scan for the newest plan in the planning window
         plan_file=$(newest_plan_file "$planning_started")
         if [[ -n "$plan_file" ]]; then
+            # Pin so subsequent calls return the same file
+            state_write plan_file "$plan_file"
             echo "$plan_file"
             return 0
         fi
