@@ -103,6 +103,17 @@
         ]
       }
     ],
+    "PreCompact": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/scripts/precompact_snapshot.sh"
+          }
+        ]
+      }
+    ],
     "SessionStart": [
       {
         "matcher": "",
@@ -110,6 +121,17 @@
           {
             "type": "command",
             "command": "~/.claude/scripts/cleanup_stale_sessions.sh"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/scripts/cleanup_old_transcripts.sh"
           }
         ]
       }
