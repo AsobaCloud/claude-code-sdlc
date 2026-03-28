@@ -44,7 +44,14 @@ if [[ -d "$STATE_DIR" ]]; then
     find "$STATE_DIR" -mindepth 1 -maxdepth 1 -type d -empty -delete 2>/dev/null
 fi
 
-# Generate token for new conversation
-generate_conversation_token >/dev/null 2>&1
+# Preserve existing token or generate new one (SEP-012)
+EXISTING_TOKEN=$(read_conversation_token 2>/dev/null || true)
+if [[ -n "$EXISTING_TOKEN" ]]; then
+    # Refresh last_active for the existing conversation
+    db_exec "INSERT OR IGNORE INTO conversations (id, project_dir) VALUES ('$(sql_escape "$EXISTING_TOKEN")', '$(sql_escape "$(pwd)")');"
+    db_exec "UPDATE conversations SET last_active = datetime('now') WHERE id='$(sql_escape "$EXISTING_TOKEN")';"
+else
+    generate_conversation_token >/dev/null 2>&1
+fi
 
 exit 0
