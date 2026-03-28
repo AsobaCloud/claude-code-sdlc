@@ -40,9 +40,19 @@ if state_exists approved; then
         fi
     fi
 
-    if [[ "$EDIT_COUNT" -gt 0 && -n "$PHASE_DETAIL" ]]; then
+    # VERIFYING phase: validation_complete set but objective not yet verified
+    IS_VERIFYING=false
+    if state_exists validation_complete && ! state_exists dirty; then
+        if ! objective_verified_for_current_plan; then
+            IS_VERIFYING=true
+            PHASE="VERIFYING"
+            PHASE_DETAIL="two-tier validation complete ✓, awaiting /verify"
+        fi
+    fi
+
+    if [[ "$EDIT_COUNT" -gt 0 && -n "$PHASE_DETAIL" && "$IS_VERIFYING" == "false" ]]; then
         PHASE_DETAIL="${PHASE_DETAIL}, edits: ${EDIT_COUNT}"
-    elif [[ "$EDIT_COUNT" -gt 0 ]]; then
+    elif [[ "$EDIT_COUNT" -gt 0 && "$IS_VERIFYING" == "false" ]]; then
         PHASE_DETAIL="edits: ${EDIT_COUNT}"
     fi
 
@@ -67,7 +77,10 @@ Scope: ${SCOPE}"
 Success criteria: ${CRITERIA}"
     [[ -n "$VALIDATION_STATUS" ]] && WORKFLOW_STATE="${WORKFLOW_STATE}
 ${VALIDATION_STATUS}"
-    if ! state_exists tests_failed; then
+    if [[ "$IS_VERIFYING" == "true" ]]; then
+        WORKFLOW_STATE="${WORKFLOW_STATE}
+Next: Invoke /verify to run acceptance checks."
+    elif ! state_exists tests_failed; then
         WORKFLOW_STATE="${WORKFLOW_STATE}
 Next: Invoke /tdd to begin TDD workflow."
     else
