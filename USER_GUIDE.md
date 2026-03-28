@@ -46,9 +46,14 @@ Instead, type **`/approve`** in the text input field. This is the only way to co
 
 | Command | When to use | What it does |
 |---------|-------------|--------------|
-| **`/approve`** | After reviewing a plan | Unlocks editing — Claude can now implement the plan |
-| **`/accept`** | After implementation is complete | Clears approval — signals you're satisfied with the work |
-| **`/reject`** | If implementation is wrong | Clears approval — forces Claude to re-plan |
+| **`/approve`** | After reviewing a plan | Rebuilds approval bundle, unlocks editing |
+| **`/accept`** | After implementation complete | Preflight check → finalize (invoke twice to bypass missing proof) |
+| **`/reject`** | If implementation is wrong | Clears approval, forces re-planning |
+| **`/tdd`** | After plan approval | Orchestrates TDD via epistemically isolated subagents |
+| **`/verify`** | After two-tier tests pass | Launches qa-verifier agent for acceptance checks |
+| **`/approve-tests`** | After reviewing TDD tests | Unlocks production code editing |
+| **`/skip-tests`** | For non-code changes | Bypasses TDD gate entirely (config, CSS, docs) |
+| **`/new-token`** | Session isolation | Generates new conversation token |
 
 ### Step-by-step
 
@@ -56,20 +61,28 @@ Instead, type **`/approve`** in the text input field. This is the only way to co
 2. Claude explores your codebase (reads docs, searches for existing code)
 3. Claude writes a plan and presents it to you
 4. **You review the plan, then type `/approve`** (do not click the built-in buttons)
-5. Claude implements the approved plan
-6. You review the implementation, then type `/accept` or `/reject`
+5. Claude writes tests (or delegates to `/tdd` subagent) — tests must fail
+6. **You review the tests, then type `/approve-tests`** (or `/skip-tests` for non-code changes)
+7. Claude implements the approved plan (scoped to listed files only)
+8. Claude runs unit + E2E tests (two-tier validation)
+9. `/verify` runs acceptance checks via an isolated qa-verifier agent
+10. You review the implementation, then type `/accept` or `/reject`
 
 ## How It Works (The User Experience)
 
-When you give Claude a task, three things happen that wouldn't normally:
+When you give Claude a task, five things happen that wouldn't normally:
 
-1. **Claude must explore before planning.** It's blocked from entering plan mode until it has read at least 3 files — your docs, your existing code, the area it's about to change. No more plans based on assumptions.
+1. **Claude must explore before planning.** The plan must show evidence of exploration — concrete file references and description of what was found. Plans based on training-data assumptions are rejected by the quality gate.
 
-2. **Claude must plan before coding.** Every `Edit`, `Write`, and `NotebookEdit` call is blocked until a plan exists and you've approved it. The plan must include four sections — **Objective** (what and why), **Scope** (every file to be modified), **Success Criteria** (how to verify), and **Justification** (why this approach, citing project docs). It must be 50+ words, reference real files, and describe what it found during exploration.
+2. **Claude must plan before coding.** Every `Edit`, `Write`, and `NotebookEdit` call is blocked until a plan exists and you've approved it. The plan must include required sections — **Objective**, **Scope**, **Success Criteria**, **Justification**, **Validation**, and **Objective Verification**. It must be 50+ words, reference real files, and cite a SEP issue.
 
-3. **Scope is enforced.** The files listed in the plan's `## Scope` section are the only files Claude can edit. Attempts to modify unlisted files are blocked. No more "while I was in there, I also refactored..."
+3. **Tests must be written first (TDD).** After plan approval, production code edits are blocked until tests have been written and have failed. You review the tests (`/approve-tests`) before implementation proceeds. The `/tdd` skill delegates test writing to an isolated subagent that can't see the implementation plan.
 
-The net effect: Claude behaves like a senior engineer on their first day — technically strong, but checking in with you before making changes because they know they lack context.
+4. **Scope is enforced.** The files listed in the plan's `## Scope` section are the only files Claude can edit. Attempts to modify unlisted files are blocked.
+
+5. **Learned patterns are injected.** Every prompt includes a `LEARNED PATTERNS` block — the top cross-project lessons ranked by correction frequency and attention score. Corrections given 7 times rank above corrections given once. Lessons that keep being relevant strengthen; internalized ones fade.
+
+The net effect: Claude behaves like a senior engineer on their first day — technically strong, but checking in with you before making changes because they know they lack context. And unlike a real engineer, it starts every session with the consolidated lessons from every prior session across all projects.
 
 ## Working With the System
 
@@ -93,7 +106,7 @@ Approval persists across your messages — you can send follow-ups like "also up
 
 ### Resuming across sessions
 
-Approval is stored per project directory and **survives across sessions**. If you approve a plan, close Claude, and come back later, the approval is still there. Claude picks up where it left off — no re-planning required.
+Approval is stored in `~/.claude/workflow.db` (SQLite) and **survives across sessions**. If you approve a plan, close Claude, and come back later, the approval is still there. Claude picks up where it left off — no re-planning required. Learned patterns from the memory system also persist in `workflow.db` and are injected into every session.
 
 ### When does approval clear?
 

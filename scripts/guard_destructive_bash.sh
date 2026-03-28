@@ -9,6 +9,19 @@ COMMAND=$(tool_input command)
 
 # ── A. Full-command checks (before splitting) ──
 
+# Direct sqlite3 access to workflow.db — ABSOLUTE BLOCK before segment splitting.
+# Full-command check prevents semicolon-in-quotes bypass (SQL injection of the parser).
+# Exclude git commands that legitimately mention workflow.db in commit messages.
+if echo "$COMMAND" | grep -qiE 'sqlite3' && echo "$COMMAND" | grep -qiE 'workflow\.db'; then
+    if ! echo "$COMMAND" | grep -qE '^(cd [^;]* && )*(git |GIT_)'; then
+        deny_tool "BLOCKED: All sqlite3 access to workflow.db is prohibited.
+
+Command: $COMMAND
+
+The agent may NEVER access workflow.db directly. Use hook scripts or state_read/state_write in common.sh."
+    fi
+fi
+
 # --no-verify: skipping hooks is never safe
 if [[ "$COMMAND" == *--no-verify* ]]; then
     deny_tool "BLOCKED: --no-verify is not permitted.
@@ -68,6 +81,18 @@ Dropping stashes permanently destroys saved work. Ask the user for explicit conf
 Command: $COMMAND
 
 Amending rewrites the previous commit. Create a new commit instead, or ask the user for explicit confirmation."
+    fi
+
+    # Direct sqlite3 invocation against workflow.db — blocks ALL access (reads and writes)
+    # Only matches segments where sqlite3 is the actual command, not mentions in strings
+    local seg_trimmed
+    seg_trimmed=$(echo "$seg" | sed 's/^[[:space:]]*//')
+    if echo "$seg_trimmed" | grep -qE '^sqlite3\s' && echo "$seg" | grep -qiE 'workflow\.db'; then
+        deny_tool "BLOCKED: All direct sqlite3 access to workflow.db is prohibited.
+
+Command: $COMMAND
+
+The agent may NEVER access workflow.db directly. Use hook scripts or state_read/state_write in common.sh."
     fi
 
     # B.2 Conditional patterns (only block when uncommitted changes exist)

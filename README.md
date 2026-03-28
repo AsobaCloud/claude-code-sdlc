@@ -58,26 +58,44 @@ If any check fails, `ExitPlanMode` is blocked and the model gets a specific erro
 ## State Machine
 
 ```
-[No Approval] ──EnterPlanMode──► [Planning] ──ExitPlanMode──► [Awaiting /approve] ──/approve──► [Approved/Implementing]
-      ^                               |                                                              |
-      |                          (reads tracked,                                               (approval persists
-      |                           counter increments)                                           across messages
-      |                                                                                         AND sessions)
-      |                                                                                              |
-      └──── /accept, /reject, or EnterPlanMode ─────────────────────────────────────────────────────┘
+IDLE
+  │ EnterPlanMode
+  ▼
+PLANNING
+  │ ExitPlanMode → quality checks pass
+  ▼
+APPROVED
+  │ Write tests → must fail (TDD red phase)
+  ▼
+TESTS_WRITTEN
+  │ /approve-tests (or /skip-tests to bypass)
+  ▼
+IMPLEMENTING
+  │ Scoped edits → dirty flag set
+  ▼
+VALIDATING
+  │ Unit tests pass → E2E tests pass → dirty clears
+  ▼
+VERIFYING
+  │ /verify → qa-verifier agent runs acceptance checks
+  ▼
+COMPLETED
+  │ /accept or /reject
+  ▼
+IDLE
 ```
 
 > **Important:** When Claude presents a plan via `ExitPlanMode`, do **not** select the built-in approval options. Instead, type **`/approve`** in the text input to properly activate the hook-based approval workflow.
 
-Approval is **persistent** — stored per project directory in `~/.claude/state/`. New sessions on the same project automatically inherit existing approval.
+All state is stored in `~/.claude/workflow.db` (SQLite), scoped per conversation via a conversation token. Sessions map to conversations via the `sessions` table, enabling state to survive compaction and session restarts.
 
 Approval is set by:
-- **`/approve`** — user approves the plan after reviewing it (plugin command)
+- **`/approve`** — user approves the plan after reviewing it
 
 Approval clears only when:
 
-- **`/accept`** — user accepts the completed implementation (plugin command)
-- **`/reject`** — user rejects; must re-plan (plugin command)
+- **`/accept`** — user accepts the completed implementation
+- **`/reject`** — user rejects; must re-plan
 - **`EnterPlanMode`** — starting a new plan cycle clears the previous one
 
 ## File Reference
@@ -86,35 +104,65 @@ Approval clears only when:
 
 | Script | Hook | Purpose |
 |--------|------|---------|
-| `common.sh` | — | Shared library: state helpers and persist-only project state |
-| `require_plan_approval.sh` | PreToolUse: Edit\|Write\|NotebookEdit | Blocks code changes without approval markers |
+| `common.sh` | — | Shared library: SQLite state API, memory CRUD, plan helpers |
+| `require_plan_approval.sh` | PreToolUse: Edit\|Write\|NotebookEdit | Blocks code changes without approval; enforces TDD gate and scope |
 | `validate_plan_quality.sh` | PreToolUse: ExitPlanMode | Quality gate — checks plan substance, evidence, and objective verification |
-| `approve_plan.sh` | PostToolUse: ExitPlanMode | Creates approval markers (session + persistent) |
+| `approve_plan.sh` | PostToolUse: ExitPlanMode | Creates approval bundle in SQLite |
 | `clear_plan_on_new_task.sh` | PostToolUse: EnterPlanMode | Clears old approval and starts a new planning cycle |
-| `check_clear_approval_command.sh` | UserPromptSubmit | No-op — approval persists across messages |
+| `check_clear_approval_command.sh` | UserPromptSubmit | Injects workflow state + learned patterns into every prompt |
 | `guard_destructive_bash.sh` | PreToolUse: Bash | Guards against destructive shell commands |
-| `accept_outcome.sh` | Via `/accept` command | Clears approval after user accepts implementation |
-| `reject_outcome.sh` | Via `/reject` command | Clears approval after user rejects implementation |
-| `restore_approval.sh` | Manual | Emergency escape hatch — restores persistent approval |
-| `clear_approval.sh` | Manual | Force-clear approval markers |
-| `cleanup_stale_sessions.sh` | SessionStart | Removes session dirs older than 6 hours |
-| `strip-claude-coauthor.sh` | Git hook | Removes "Co-Authored-By: Claude" from commit messages |
+| `sep_commit_check.sh` | PreToolUse: Bash | Blocks git commits without SEP reference |
+| `track_dirty.sh` | PostToolUse: Edit\|Write\|NotebookEdit | Sets dirty flag on file edits |
+| `track_validation.sh` | PostToolUse: Bash | Tracks unit/E2E test results, manages two-tier validation |
+| `track_test_failure.sh` | PostToolUseFailure: Bash | Sets tests_failed marker for TDD red phase |
+| `precompact_snapshot.sh` | PreCompact | Snapshots workflow state before context compaction |
+| `cleanup_old_transcripts.sh` | SessionEnd | Deletes transcripts >5 days old, applies memory attention decay |
+| `cleanup_stale_sessions.sh` | SessionStart | Cleans stale SQLite data, creates shared-memory symlinks |
+| `accept_outcome.sh` | Via `/accept` command | Preflight checks + finalize acceptance |
+| `reject_outcome.sh` | Via `/reject` command | Marks plan rejected, clears state |
+| `restore_approval.sh` | Via `/approve` command | Rebuilds approval bundle from newest plan |
+| `clear_approval.sh` | Manual | Blocks if dirty/unverified; clears workflow state |
+| `record_validation.sh` | Manual | Records objective verification (--command or --manual) |
+| `approve_tests.sh` | Via `/approve-tests` | Sets tests_reviewed marker after TDD review |
+| `skip_tests.sh` | Via `/skip-tests` | Bypasses TDD gate entirely |
+| `generate_token.sh` | Via `/new-token` | Generates conversation token for session isolation |
+| `migrate_memories.sh` | Manual | Ingests shared-memory feedback files into SQLite |
+| `enrich_memories.sh` | Manual | Populates anticipated_queries and concept_tags |
 
-### Plugin (`plugins/plan-workflow/`)
+### Commands
 
-| Command | Description |
-|---------|-------------|
-| `/approve` | Approve the current plan and unlock editing |
-| `/accept` | Accept completed implementation, clear plan approval |
-| `/reject` | Reject implementation, clear approval, request feedback |
+| Command | When to use | What it does |
+|---------|-------------|--------------|
+| `/approve` | After reviewing a plan | Rebuilds approval bundle, unlocks editing |
+| `/accept` | After implementation complete | Preflight check → finalize (invoke twice to bypass missing proof) |
+| `/reject` | If implementation is wrong | Clears approval, forces re-planning |
+| `/tdd` | After plan approval | Orchestrates TDD via epistemically isolated subagents |
+| `/verify` | After two-tier validation passes | Launches qa-verifier agent for acceptance checks |
+| `/approve-tests` | After reviewing TDD tests | Unlocks production code editing |
+| `/skip-tests` | For non-code changes | Bypasses TDD gate entirely |
+| `/new-token` | Session isolation | Generates new conversation token |
 
 ### State Storage
 
 | Location | Scope | Survives sessions? |
 |----------|-------|--------------------|
-| `~/.claude/state/{project_hash}/` | Project-specific (approval, scope, dirty, validation, planning markers) | Yes |
+| `~/.claude/workflow.db` | All conversations (SQLite, WAL mode) | Yes |
+| `~/.claude/plans/{token}/` | Per-conversation plan files | Yes |
+| `~/.claude/shared-memory/` | Cross-project feedback memories | Yes |
 
-The current hook state is persist-only per project. Approval, planning markers, and validation progress all live under `~/.claude/state/{project_hash}/`.
+All workflow state lives in `~/.claude/workflow.db`, scoped per conversation via `conversation_id`. The `sessions` table maps Claude Code's `session_id` to conversation tokens, enabling state to survive compaction and session restarts. The MEMORY.md token provides a backup recovery path.
+
+### Memory System
+
+The memory subsystem (SEPs 016-019) provides cross-project learning:
+
+- **13 consolidated feedback memories** in `~/.claude/shared-memory/`, migrated into SQLite with FTS5 full-text search
+- **Semantic enrichment**: keywords, anticipated_queries, and concept_tags bridge the vocabulary gap between how memories are written and how they're searched for
+- **Attention scoring**: each injection boosts attention by 0.15 (capped at 1.0); session-end decay at type-specific rates (feedback 0.95, pattern 0.98, task 0.85)
+- **Tiered injection**: HOT (≥0.7) shows full content, WARM (0.25–0.7) title only, COLD (<0.25) omitted
+- **Ranked by**: `(correction_count * 2.0) + (attention_score * 3.0) + (access_count * 0.1)`
+
+Top memories are injected as a `LEARNED PATTERNS` block into every `UserPromptSubmit` response.
 
 ### Git Hooks (`git-hooks/`)
 

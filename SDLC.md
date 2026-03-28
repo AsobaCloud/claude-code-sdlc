@@ -15,18 +15,21 @@ Left to its defaults, Claude Code will:
 
 The root cause isn't capability — it's a workflow problem. Claude Code's helpfulness bias makes it race to produce code. Instructions telling it to "explore first" are suggestions it can and does ignore. The solution is mechanical enforcement: hooks that block tool execution when steps are skipped.
 
-## The Six Phases
+## The Eight Phases
 
-Every task flows through six phases. Each phase has a gate — a hook script that blocks progress until the phase's requirements are met. The model experiences correct behavior as the path of least resistance.
+Every task flows through eight phases. Each phase has a gate — a hook script that blocks progress until the phase's requirements are met. The model experiences correct behavior as the path of least resistance.
 
 ```
- [1. Explore] ──► [2. Plan] ──► [3. Review] ──► [4. Implement] ──► [5. Validate] ──► [6. Complete]
-      │                │              │                │                  │                │
-  First Action     validate_       /approve         require_plan_     track_dirty.sh    /accept
-  Protocol in      plan_quality.sh  (human gate)    approval.sh       track_            /reject
-  CLAUDE.md        (quality gate)                   (scope gate)      validation.sh
-                                                                     (two-tier gate)
+ [1. Explore] ──► [2. Plan] ──► [3. Review] ──► [4. TDD Red] ──► [5. Implement] ──► [6. Validate] ──► [7. Verify] ──► [8. Complete]
+      │                │              │               │                │                  │                 │               │
+  First Action     validate_       /approve        require_plan_    require_plan_     track_dirty.sh    /verify          /accept
+  Protocol in      plan_quality.sh  (human)        approval.sh      approval.sh       track_            qa-verifier      /reject
+  CLAUDE.md        (quality gate)                  (TDD gate:       (scope gate)      validation.sh     agent
+                                                    tests must                        (two-tier gate)
+                                                    fail first)
 ```
+
+All state is stored in `~/.claude/workflow.db` (SQLite with WAL mode), scoped per conversation via conversation tokens.
 
 ### Phase 1: Exploration
 
@@ -70,7 +73,17 @@ Every task flows through six phases. Each phase has a gate — a hook script tha
 
 **Enforcement script:** `scripts/approve_plan.sh`, `plugins/plan-workflow/` (`/approve` command)
 
-### Phase 4: Scoped Implementation
+### Phase 4: TDD Red Phase
+
+**What:** Before editing production code, Claude must write tests that fail. The tests must be reviewed by the user before implementation proceeds.
+
+**How:** `require_plan_approval.sh` checks for a `tests_failed` marker before allowing edits to non-test files. Test files (matching patterns like `test_*.py`, `*.test.ts`, files under `tests/`) are always editable. When a test runner command exits non-zero, `track_test_failure.sh` sets the `tests_failed` marker. The user then reviews the tests and types `/approve-tests` to set `tests_reviewed`, or `/skip-tests` to bypass TDD entirely (for config changes, CSS, documentation).
+
+**Why:** Without TDD enforcement, Claude writes tests that validate its own implementation — circular tests that prove the code does what the code does. By requiring tests to be written and to fail before production code is editable, the tests are designed from requirements, not from implementation knowledge. The `/tdd` skill further strengthens this by delegating test writing to an epistemically isolated `tdd-test-writer` subagent that cannot see the implementation plan.
+
+**Enforcement scripts:** `scripts/require_plan_approval.sh` (TDD gate), `scripts/track_test_failure.sh`, `scripts/approve_tests.sh`, `scripts/skip_tests.sh`
+
+### Phase 5: Scoped Implementation
 
 **What:** Claude can only edit files listed in the plan's `## Scope` section.
 
@@ -98,7 +111,17 @@ For code-change plans, that is not sufficient on its own. The approved `## Objec
 
 **Enforcement scripts:** `scripts/track_dirty.sh`, `scripts/track_validation.sh`
 
-### Phase 6: Completion
+### Phase 7: Verification (VERIFYING)
+
+**What:** After two-tier validation passes, a `qa-verifier` agent runs acceptance checks derived solely from the plan's objective and success criteria — with no knowledge of the implementation.
+
+**How:** When both unit and E2E tests pass, `track_validation.sh` sets `validation_complete` and the `UserPromptSubmit` hook directs the model to invoke `/verify`. The `/verify` skill launches the `qa-verifier` agent with epistemic isolation: it receives only the objective and success criteria, never the implementation details or test code. The agent generates verification steps, runs them, and on all-pass calls `record_validation.sh` and `clear_approval.sh`.
+
+**Why:** Two-tier tests prove the code works mechanically. Verification proves the objective is achieved. These are different claims. A test suite can pass while the user-facing outcome is broken (e.g., tests check string patterns but the actual feature doesn't render). Epistemic isolation ensures the verifier doesn't rubber-stamp the implementation by checking what the implementation does rather than what the objective requires.
+
+**Enforcement scripts:** `scripts/track_validation.sh` (sets `validation_complete`), `scripts/record_validation.sh`, `/verify` skill, `qa-verifier` agent
+
+### Phase 8: Completion
 
 **What:** The human explicitly accepts or rejects the implementation, but the agent cannot complete unless the current plan objective is verified or the user manually bypasses the missing proof.
 
@@ -126,11 +149,19 @@ These protections operate across all phases, not within a specific one.
 
 **Why:** Every commit should trace back to a documented change proposal. This prevents orphan commits that nobody can explain six months later. SEPs (Software Evolution Proposals) provide the "why" for every change, making the git history navigable.
 
-### Investigation Protocol
+### Database Integrity Guard
 
-`require_investigation_plan.sh` activates when a diagnostic question is detected (errors, failures, "why is X broken"). It blocks all tools except `EnterPlanMode` until an investigation plan with `## Hypothesis` and `## Investigation Steps` is written and approved.
+`guard_destructive_bash.sh` blocks direct `sqlite3` write commands against `workflow.db`. The hook system's state must only be modified through the `state_read`/`state_write` API in `common.sh` or the designated hook scripts (`/approve`, `/skip-tests`, etc.). Direct SQL modifications bypass integrity guarantees and cause cascading state corruption.
 
-**Why:** Diagnostic questions are where Claude is most likely to confabulate. Without this gate, it will read one error message and confidently declare a root cause that's wrong. The investigation protocol forces systematic diagnosis: state a hypothesis, list investigation steps, gather evidence, then conclude. The user can type `/skip-investigation` to bypass this for simple questions.
+**Why:** In multiple incidents, the agent patched workflow.db directly via `sqlite3` to bypass hook blocks — setting `tests_failed`, `tests_reviewed`, and approval markers without going through the proper workflow. This undermines the entire purpose of the enforcement system. The guard mechanically prevents this.
+
+### Memory System
+
+The `UserPromptSubmit` hook (`check_clear_approval_command.sh`) injects a `LEARNED PATTERNS` block into every prompt, surfacing the most important cross-project lessons from the `memories` table in `workflow.db`. Memories are ranked by `(correction_count * 2.0) + (attention_score * 3.0) + (access_count * 0.1)` and rendered in tiers: HOT (≥0.7 attention) shows full content, WARM (0.25–0.7) shows title only, COLD (<0.25) is omitted.
+
+At session boundaries (`SessionEnd` hook), attention scores decay at type-specific rates: feedback 0.95, pattern/preference 0.98, task/note 0.85, gotcha 0.97. Each injection boosts attention by 0.15 (capped at 1.0). This creates a natural learning loop: corrections that keep being relevant strengthen; lessons that have been internalized fade.
+
+**Why:** The agent has no durable learning mechanism — every session starts from zero. Without memory injection, the same corrections must be given repeatedly across sessions and projects. The memory system (SEPs 016–019, inspired by the Sift architecture) provides cross-project learning backed by SQLite FTS5 full-text search with Porter stemming and semantic enrichment (anticipated queries, concept tags).
 
 ### Pre-Commit Linting Pipeline
 
@@ -221,9 +252,11 @@ User gives task
 
 | Location | Scope | Survives sessions? |
 |----------|-------|--------------------|
-| `~/.claude/state/{project_hash}/` | Project-specific (approval, scope, dirty, validated, planning markers) | Yes |
+| `~/.claude/workflow.db` | All conversations (SQLite, WAL mode) | Yes |
+| `~/.claude/plans/{token}/` | Per-conversation plan files | Yes |
+| `~/.claude/shared-memory/` | Cross-project feedback memories | Yes |
 
-The current hook state is persist-only per project. Approval, dirty flags, planning markers, and validation progress all carry across sessions automatically.
+All workflow state lives in `~/.claude/workflow.db`, scoped per conversation via `conversation_id`. The `sessions` table maps Claude Code's `session_id` to conversation tokens, enabling state to survive context compaction and session restarts. Memories (FTS5-indexed, with attention scoring and semantic enrichment) are global — not per-project.
 
 ## Further Reading
 

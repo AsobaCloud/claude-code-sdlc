@@ -548,7 +548,89 @@ Stored at `~/.claude/agents/tdd-{test-writer,implementer,refactorer}.md`. Each i
 
 ---
 
-## 12. Implementation Status
+## 12. Memory Subsystem (SEPs 016–019)
+
+### Purpose
+
+The memory subsystem provides cross-project learning. Without it, every session starts from zero — the same corrections must be given repeatedly across sessions and projects. The design is inspired by the Sift architecture (Edmonds, 2026): typed memories, FTS5 full-text search, semantic enrichment, and attention scoring — all in SQLite with no external dependencies.
+
+### Schema (`~/.claude/workflow.db`)
+
+```sql
+CREATE TABLE memories (
+    id TEXT PRIMARY KEY,
+    type TEXT NOT NULL,            -- feedback, pattern, gotcha, preference
+    title TEXT NOT NULL,
+    content TEXT,
+    keywords TEXT,                  -- comma-separated semantic terms
+    anticipated_queries TEXT,       -- natural-language search predictions
+    concept_tags TEXT,              -- pipe-delimited hierarchical: |feedback/workflow|
+    project_scope TEXT,             -- NULL = global
+    correction_count INTEGER DEFAULT 1,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    last_accessed INTEGER,
+    access_count INTEGER DEFAULT 0,
+    attention_score REAL DEFAULT 0.5
+);
+
+CREATE VIRTUAL TABLE memories_fts USING fts5(
+    title, content, keywords, anticipated_queries,
+    tokenize='porter unicode61'
+);
+```
+
+### CRUD Functions (`common.sh`)
+
+| Function | Parameters | Purpose |
+|---|---|---|
+| `memory_write` | id, type, title, content, keywords, project_scope, correction_count, anticipated_queries, concept_tags | Upsert memory + FTS entry (uses Python for safe parameterized insert) |
+| `memory_search` | query, limit | FTS5 search ranked by `(correction_count * 2) + bm25() * -1 + (access_count * 0.5)` |
+| `memory_top` | limit | Top memories by `(correction_count * 2) + (attention_score * 3) + (access_count * 0.1)` |
+| `memory_access` | id | Increment access_count, boost attention_score by 0.15 (capped at 1.0) |
+
+### Semantic Enrichment
+
+Each memory carries three annotation fields populated at write time by the in-context LLM:
+
+- **keywords**: comma-separated semantic terms and synonyms (e.g., "permission, confirmation, redundant, re-confirm")
+- **anticipated_queries**: natural-language queries someone might use to find this memory (e.g., "stop asking permission, unnecessary confirmation")
+- **concept_tags**: pipe-delimited hierarchical tags for category filtering (e.g., `|feedback/workflow|feedback/autonomy|`)
+
+Keywords and anticipated_queries are indexed in FTS5. Concept tags use SQL `LIKE` prefix matching for hierarchical navigation.
+
+### Attention Scoring
+
+- **Access boost**: each `UserPromptSubmit` injection increments attention by 0.15, capped at 1.0
+- **Session decay** (`SessionEnd` hook in `cleanup_old_transcripts.sh`):
+  - Feedback: 0.95 retention per session
+  - Pattern/preference: 0.98 retention
+  - Task/note: 0.85 retention
+  - Gotcha: 0.97 retention
+- **Tiered injection** in `check_clear_approval_command.sh`:
+  - HOT (≥0.7): full title + content snippet
+  - WARM (0.25–0.7): title only
+  - COLD (<0.25): omitted
+
+### Injection
+
+The `UserPromptSubmit` hook queries `memory_top(10)` and injects a `── LEARNED PATTERNS ──` block into every prompt. Injected memories get their access_count and attention_score boosted. This creates a reinforcement loop: useful memories strengthen, unused ones fade.
+
+### Migration
+
+- `migrate_memories.sh`: ingests `~/.claude/shared-memory/feedback_*.md` files into the database (parses YAML frontmatter for type and correction_count)
+- `enrich_memories.sh`: populates anticipated_queries and concept_tags for existing memories
+
+### Invariants
+
+1. Memories are global by default (`project_scope = NULL`). Project-scoped memories filter on the column.
+2. FTS5 index is rebuilt on every `ensure_db()` call (DROP + CREATE + repopulate from memories table).
+3. All writes go through `memory_write()` which handles both the memories table and FTS sync atomically.
+4. Direct `sqlite3` modification of `workflow.db` is blocked by `guard_destructive_bash.sh`.
+
+---
+
+## 13. Implementation Status
 
 | Contract requirement | Current state | Tracking |
 |---|---|---|
@@ -564,5 +646,11 @@ Stored at `~/.claude/agents/tdd-{test-writer,implementer,refactorer}.md`. Each i
 | Conversation identity via `sessions` table | SESSION_ID → conversation lookup in SQLite | SEP-010 ✅ |
 | Stale conversation cleanup | `cleanup_stale_sessions.sh` deletes conversations inactive 7+ days | SEP-010 ✅ |
 | Orphaned plan file cleanup | 119+ orphaned plans, no cleanup mechanism | Needs design |
-| `PreCompact` hook for state snapshot | Not used | Optional enhancement |
+| `PreCompact` hook for state snapshot | `precompact_snapshot.sh` captures phase markers and recent events | SEP-006 ✅ |
 | TDD subagents for epistemic isolation | Agent definitions + `/tdd` skill + test file scope exemption + hook directives | SEP-013 ✅ |
+| SessionEnd transcript cleanup | `cleanup_old_transcripts.sh` deletes transcripts >5 days old | SEP-015 ✅ |
+| Cross-project feedback consolidation | 48 per-project memories → 13 shared-memory files with deduplication | SEP-016 ✅ |
+| FTS5 memories table | `memories` + `memories_fts` in workflow.db with correction_count ranking | SEP-017 ✅ |
+| Semantic enrichment | anticipated_queries, concept_tags, keywords in FTS5 index | SEP-018 ✅ |
+| Attention scoring + decay | attention_score with access boost, session-end type-specific decay, tiered injection | SEP-019 ✅ |
+| Direct DB write guard | `guard_destructive_bash.sh` blocks `sqlite3` write commands against workflow.db | SEP-020 ✅ |
