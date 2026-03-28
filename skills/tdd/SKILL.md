@@ -114,11 +114,12 @@ Working directory: <project path>
 
 ## After All Phases
 
-Once Phase B (and optionally C) is complete:
-1. Run the approved Objective Verification command from the plan
-2. Record it with `~/.claude/scripts/record_validation.sh --command "<command>"`
-3. Run `~/.claude/scripts/clear_approval.sh`
-4. Tell the user to `/accept` or `/reject`
+Once Phase B (and optionally C) is complete, invoke `/verify` to run the VERIFYING phase:
+1. Invoke `/verify` — this launches the `qa-verifier` agent with only the objective and success criteria
+2. The agent generates verification steps, runs them, and reports pass/fail
+3. On all-pass: the agent calls `record_validation.sh` and `clear_approval.sh`
+4. On any failure: report failures to the user — do NOT proceed to `/accept`
+5. Tell the user to `/accept` or `/reject` only after `/verify` completes successfully
 
 ## Critical Rules
 
