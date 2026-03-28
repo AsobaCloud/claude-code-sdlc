@@ -32,6 +32,8 @@ fi
 state_remove planning
 state_remove planning_started_at
 
+log_event "approval_restored" "$PLAN_FILE"
+
 echo "Approval restored for project (hash: ${PROJECT_HASH})."
 echo "Plan: ${PLAN_FILE}"
 echo "Will persist across sessions until /accept, /reject, or new plan cycle."

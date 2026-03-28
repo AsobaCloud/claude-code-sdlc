@@ -8,6 +8,8 @@ init_hook
 prev_obj=$(state_read objective)
 prev_plan=$(state_read plan_file)
 
+log_event "plan_cycle_new" "$prev_obj"
+
 # Selective clear — remove workflow keys, then plan context keys
 clear_workflow_keys
 clear_plan_context_keys

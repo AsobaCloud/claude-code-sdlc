@@ -7,6 +7,7 @@ source "$(dirname "$0")/common.sh"
 init_persist_dir
 
 if state_exists dirty; then
+    log_event "clear_blocked_dirty" "$(state_read dirty)"
     echo "BLOCKED: Unvalidated edits exist. Run the approved objective verification before signaling completion."
     echo "Dirty since: $(state_read dirty)"
     exit 1
@@ -19,6 +20,8 @@ if objective_verification_required_for_current_plan && ! objective_verified_for_
     echo "If proof cannot be recorded, report objective unverified and stop. Only the user may bypass via /accept."
     exit 1
 fi
+
+log_event "approval_cleared" ""
 
 clear_workflow_keys
 clear_plan_context_keys

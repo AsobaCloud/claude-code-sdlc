@@ -90,6 +90,9 @@ if acceptance_needs_bypass && ! user_bypass_for_current_plan; then
     exit 1
 fi
 
+OBJECTIVE_CONTENT=$(state_read objective)
+log_event "outcome_accepted" "$OBJECTIVE_CONTENT"
+
 # Display validation evidence before clearing
 echo "── VALIDATION EVIDENCE ──"
 VALIDATED_CONTENT=$(state_read validated)
@@ -120,7 +123,6 @@ echo "────────────────────────�
 # Extract SEP reference and objective from plan before clearing
 SEP_REF=""
 OBJECTIVE_TEXT=""
-OBJECTIVE_CONTENT=$(state_read objective)
 if [[ -n "$OBJECTIVE_CONTENT" ]]; then
     SEP_REF=$(echo "$OBJECTIVE_CONTENT" | grep -oE 'SEP-[0-9]+' 2>/dev/null | head -1 || true)
     OBJECTIVE_TEXT=$(echo "$OBJECTIVE_CONTENT" | head -1)

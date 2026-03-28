@@ -24,6 +24,7 @@ if $IS_TEST; then
     state_write tests_failed "$(date -u +%Y-%m-%dT%H:%M:%SZ) $COMMAND"
     # Append to validation log
     state_append validation_log "$(date -u +%Y-%m-%dT%H:%M:%SZ) FAILED: $COMMAND"
+    log_event "test_failed_red_phase" "$COMMAND"
 fi
 
 exit 0

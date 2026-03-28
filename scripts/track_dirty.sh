@@ -14,4 +14,5 @@ FILE_PATH=$(tool_input file_path)
 
 # Set dirty marker with timestamp
 state_write dirty "$(date -u +%Y-%m-%dT%H:%M:%SZ) $FILE_PATH"
+log_event "dirty_set" "$FILE_PATH"
 exit 0

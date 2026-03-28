@@ -6,6 +6,9 @@ set -euo pipefail
 source "$(dirname "$0")/common.sh"
 init_persist_dir
 
+OBJECTIVE_CONTENT=$(state_read objective)
+log_event "outcome_rejected" "$OBJECTIVE_CONTENT"
+
 # Update plans table: mark current plan as 'rejected'
 CURRENT_PLAN_ID=$(db_query "SELECT id FROM plans WHERE conversation_id='$(sql_escape "$CONV_ID")' AND status='approved' ORDER BY id DESC LIMIT 1;")
 if [[ -n "$CURRENT_PLAN_ID" ]]; then
