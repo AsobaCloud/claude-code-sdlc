@@ -38,11 +38,16 @@ IMPLEMENTING
 VALIDATING
   │ Run unit tests (sets validated_unit)
   │ Run E2E tests (sets validated_e2e)
-  │ Both must pass → dirty clears
+  │ Both must pass → dirty clears, validation_complete set
+  ▼
+VERIFYING
+  │ Invoke /verify → launches qa-verifier agent
+  │ Agent receives only objective + success criteria (epistemic isolation)
+  │ Agent generates ≥1 verification step per criterion, runs them
+  │ All pass → agent calls record_validation.sh + clear_approval.sh
   ▼
 VERIFIED
-  │ Run objective verification command
-  │ Record with record_validation.sh --command
+  │ objective_verified marker set by record_validation.sh --command
   ▼
 COMPLETED
   │ clear_approval.sh → user /accept or /reject
@@ -144,6 +149,7 @@ CREATE TABLE events (
 | `validation_log` | multi-line | Append-only validation log |
 | `validated_unit` | command | Unit test that passed |
 | `validated_e2e` | command | E2E test that passed |
+| `validation_complete` | ISO8601 | Set when both unit and E2E tiers pass; triggers VERIFYING phase |
 | `tests_failed` | `"timestamp command"` | Red phase marker |
 | `tests_reviewed` | timestamp | Set by /approve-tests |
 | `objective_verified` | ISO8601 | Verification timestamp |
@@ -262,6 +268,21 @@ Completed plans may be archived or deleted. No plan file persists indefinitely.
 | `record_validation.sh` | Record proof | `--command`: records objective verification; `--manual`: records pending user verification |
 | `generate_token.sh` | `/new-token` command | Generates conversation token, writes to MEMORY.md |
 | `approve_tests.sh` | `/approve-tests` command | Sets tests_reviewed marker |
+
+### Agents
+
+| Agent | Purpose | Key behavior |
+|---|---|---|
+| `tdd-test-writer` | Phase A — write failing tests | Receives objective + criteria + scope only; writes test files; MUST NOT read plan details |
+| `tdd-implementer` | Phase B — make tests pass | Receives test file paths + scope only; writes production code; MUST NOT read plan or test rationale |
+| `qa-verifier` | VERIFYING phase — acceptance checks | Receives objective + criteria only (epistemic isolation); generates ≥1 verification step per criterion; reports structured pass/fail; calls `record_validation.sh` and `clear_approval.sh` only on all-pass |
+
+### Skills and commands
+
+| Skill/Command | Purpose |
+|---|---|
+| `/tdd` | Orchestrates the red-green-refactor cycle using isolated subagents; hands off to `/verify` after Phase B/C |
+| `/verify` | Runs the VERIFYING phase: extracts objective + criteria from plan, launches `qa-verifier` agent with epistemic isolation |
 
 ---
 
