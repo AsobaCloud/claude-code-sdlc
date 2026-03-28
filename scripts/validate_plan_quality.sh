@@ -238,7 +238,7 @@ else
         fi
 
         # Architecture changes need external sources
-        if echo "$PLAN_CONTENT" | grep -qiE '(architect|refactor|redesign|restructure|migrate|rewrite|eliminate.*state|single source of truth)'; then
+        if echo "$PLAN_CONTENT" | grep -qiE '(\barchitect(s|ural)?\b|refactor|redesign|restructure|migrate|rewrite|eliminate.*state|single source of truth)'; then
             EXT_SOURCES=$(echo "$VAL_CONTENT" | grep -ciE '(http|docs\.|documentation|spec|RFC|official|reference|per .*docs)')
             if [[ "$EXT_SOURCES" -lt 2 ]]; then
                 ERRORS+="## Validation: Architecture change detected but <2 external source citations.
@@ -288,10 +288,13 @@ fi  # end IS_INVESTIGATION branch
 
 # ── Emit all errors at once, or pass ──
 if [[ -n "$ERRORS" ]]; then
+    log_event "plan_quality_failed" "$(echo "$ERRORS" | head -3 | tr '\n' ' ')"
     deny_tool "BLOCKED: Plan quality checks failed.
 
 ${ERRORS}NEXT ACTION: Fix all issues above in your plan file, then call ExitPlanMode again."
 fi
+
+log_event "plan_approved" "$(basename "$PLAN_FILE")"
 
 # ── All checks passed — save plan to SQLite, then create approval bundle ──
 PLAN_CONTENT_FOR_DB=$(cat "$PLAN_FILE" 2>/dev/null)
