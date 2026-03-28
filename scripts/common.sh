@@ -84,10 +84,31 @@ CREATE TABLE IF NOT EXISTS plans (
     completed_at    TEXT
 );
 
+CREATE TABLE IF NOT EXISTS memories (
+    id TEXT PRIMARY KEY,
+    type TEXT NOT NULL,
+    title TEXT NOT NULL,
+    content TEXT,
+    keywords TEXT,
+    project_scope TEXT,
+    correction_count INTEGER DEFAULT 1,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    last_accessed INTEGER,
+    access_count INTEGER DEFAULT 0
+);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
+    title, content, keywords,
+    tokenize='porter unicode61'
+);
+
 CREATE INDEX IF NOT EXISTS idx_sessions_conv ON sessions(conversation_id);
 CREATE INDEX IF NOT EXISTS idx_events_conv ON events(conversation_id);
 CREATE INDEX IF NOT EXISTS idx_conv_project ON conversations(project_dir);
 CREATE INDEX IF NOT EXISTS idx_plans_conv ON plans(conversation_id);
+CREATE INDEX IF NOT EXISTS idx_memories_type ON memories(type);
+CREATE INDEX IF NOT EXISTS idx_memories_correction ON memories(correction_count DESC);
 SQL
     _DB_INITIALIZED=1
 }
@@ -261,6 +282,60 @@ counter_increment() {
 log_event() {
     local event_type="$1" detail="${2:-}"
     db_exec "INSERT INTO events (conversation_id, session_id, event_type, detail) VALUES ('$(sql_escape "${CONV_ID:-}")', '$(sql_escape "${SESSION_ID:-}")', '$(sql_escape "$event_type")', '$(sql_escape "$detail")');"
+}
+
+# ── Memory functions (memories + memories_fts tables) ──
+
+memory_write() {
+    local id="$1" type="$2" title="$3" content="$4" keywords="${5:-}" project_scope="${6:-}" correction_count="${7:-1}"
+    local now
+    now=$(date +%s)
+    ensure_db
+    # Delete old FTS entry if updating
+    local old_rowid
+    old_rowid=$(db_query "SELECT rowid FROM memories WHERE id='$(sql_escape "$id")';")
+    if [[ -n "$old_rowid" ]]; then
+        sqlite3 "$WORKFLOW_DB" "DELETE FROM memories_fts WHERE rowid = $old_rowid;"
+    fi
+    # Use Python for safe parameterized insert (content may contain arbitrary quotes)
+    python3 -c "
+import sqlite3, sys
+db = sqlite3.connect('$WORKFLOW_DB')
+db.execute('''INSERT OR REPLACE INTO memories (id, type, title, content, keywords, project_scope, correction_count, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM memories WHERE id=?), ?), ?)''',
+(sys.argv[1], sys.argv[2], sys.argv[3], sys.stdin.read(), sys.argv[4], sys.argv[5] or None, int(sys.argv[6]), sys.argv[1], int(sys.argv[7]), int(sys.argv[7])))
+db.commit()
+" "$id" "$type" "$title" "$keywords" "$project_scope" "$correction_count" "$now" <<< "$content"
+    # Insert new FTS entry
+    local new_rowid
+    new_rowid=$(db_query "SELECT rowid FROM memories WHERE id='$(sql_escape "$id")';")
+    python3 -c "
+import sqlite3, sys
+db = sqlite3.connect('$WORKFLOW_DB')
+db.execute('INSERT INTO memories_fts(rowid, title, content, keywords) VALUES (?, ?, ?, ?)',
+(int(sys.argv[1]), sys.argv[2], sys.stdin.read(), sys.argv[3]))
+db.commit()
+" "$new_rowid" "$title" "$keywords" <<< "$content"
+}
+
+memory_search() {
+    local query="$1" limit="${2:-10}"
+    ensure_db
+    db_query "SELECT m.id, m.title, m.content, m.type, m.correction_count, bm25(memories_fts) AS relevance FROM memories m JOIN memories_fts f ON m.rowid = f.rowid WHERE memories_fts MATCH '$(sql_escape "$query")' ORDER BY (m.correction_count * 2.0) + bm25(memories_fts) * -1.0 + (m.access_count * 0.5) LIMIT $limit;"
+}
+
+memory_top() {
+    local limit="${1:-5}"
+    ensure_db
+    db_query "SELECT id, title, content, type, correction_count FROM memories ORDER BY correction_count DESC, access_count DESC, updated_at DESC LIMIT $limit;"
+}
+
+memory_access() {
+    local id="$1"
+    local now
+    now=$(date +%s)
+    ensure_db
+    db_exec "UPDATE memories SET access_count = access_count + 1, last_accessed = $now WHERE id='$(sql_escape "$id")';"
 }
 
 # ── Plan query helpers (plans table) ──

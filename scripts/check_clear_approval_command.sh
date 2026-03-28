@@ -200,6 +200,21 @@ if [[ -n "$WORKFLOW_STATE" ]]; then
 ${WORKFLOW_STATE}"
 fi
 
+# ── Inject learned patterns from memories table ──
+ensure_db
+PATTERNS=$(db_query "SELECT title || '|' || REPLACE(SUBSTR(content, 1, 200), CHAR(10), ' ') FROM memories ORDER BY correction_count DESC, access_count DESC, updated_at DESC LIMIT 5;" 2>/dev/null || true)
+if [[ -n "$PATTERNS" ]]; then
+    LEARNED_BLOCK="── LEARNED PATTERNS (correction count) ──"
+    while IFS='|' read -r mem_title mem_rule; do
+        [[ -z "$mem_title" ]] && continue
+        LEARNED_BLOCK="${LEARNED_BLOCK}
+• ${mem_title}: ${mem_rule}"
+    done <<< "$PATTERNS"
+    FULL_CONTEXT="${FULL_CONTEXT}
+
+${LEARNED_BLOCK}"
+fi
+
 # ── Output: allow with context injection ──
 jq -n --arg ctx "$FULL_CONTEXT" '{
     "hookSpecificOutput": {
