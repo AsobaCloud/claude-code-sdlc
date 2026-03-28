@@ -50,9 +50,11 @@ state_append validation_log "$(date -u +%Y-%m-%dT%H:%M:%SZ) $COMMAND"
 # Set tier markers
 if $IS_UNIT; then
     state_write validated_unit "$COMMAND"
+    log_event "validation_unit_pass" "$COMMAND"
 fi
 if $IS_E2E; then
     state_write validated_e2e "$COMMAND"
+    log_event "validation_e2e_pass" "$COMMAND"
 fi
 
 # Record last validated command
@@ -60,10 +62,14 @@ state_write validated "$COMMAND"
 
 # Only clear dirty when BOTH tiers are satisfied
 if state_exists validated_unit && state_exists validated_e2e; then
+    UNIT_CMD=$(state_read validated_unit)
+    E2E_CMD=$(state_read validated_e2e)
     state_remove dirty
     state_remove validated_unit
     state_remove validated_e2e
     state_remove tests_failed
+    state_write validation_complete "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    log_event "validation_two_tier_complete" "unit=${UNIT_CMD}; e2e=${E2E_CMD}"
     allow_with_context "Two-tier validation complete: both unit and E2E passed. Dirty flag cleared." "PostToolUse"
 else
     # Report which tier was recorded
