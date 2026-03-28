@@ -90,6 +90,8 @@ CREATE TABLE IF NOT EXISTS memories (
     title TEXT NOT NULL,
     content TEXT,
     keywords TEXT,
+    anticipated_queries TEXT,
+    concept_tags TEXT,
     project_scope TEXT,
     correction_count INTEGER DEFAULT 1,
     created_at INTEGER NOT NULL,
@@ -98,10 +100,17 @@ CREATE TABLE IF NOT EXISTS memories (
     access_count INTEGER DEFAULT 0
 );
 
-CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
-    title, content, keywords,
+-- FTS5 must be recreated to include anticipated_queries column
+DROP TABLE IF EXISTS memories_fts;
+CREATE VIRTUAL TABLE memories_fts USING fts5(
+    title, content, keywords, anticipated_queries,
     tokenize='porter unicode61'
 );
+
+-- Repopulate FTS from memories table after schema upgrade
+INSERT OR IGNORE INTO memories_fts(rowid, title, content, keywords, anticipated_queries)
+    SELECT rowid, title, COALESCE(content,''), COALESCE(keywords,''), COALESCE(anticipated_queries,'')
+    FROM memories;
 
 CREATE INDEX IF NOT EXISTS idx_sessions_conv ON sessions(conversation_id);
 CREATE INDEX IF NOT EXISTS idx_events_conv ON events(conversation_id);
@@ -110,6 +119,9 @@ CREATE INDEX IF NOT EXISTS idx_plans_conv ON plans(conversation_id);
 CREATE INDEX IF NOT EXISTS idx_memories_type ON memories(type);
 CREATE INDEX IF NOT EXISTS idx_memories_correction ON memories(correction_count DESC);
 SQL
+    # Schema upgrade: add columns for SEP-018 (silently ignore if they already exist)
+    sqlite3 "$WORKFLOW_DB" "ALTER TABLE memories ADD COLUMN anticipated_queries TEXT;" 2>/dev/null || true
+    sqlite3 "$WORKFLOW_DB" "ALTER TABLE memories ADD COLUMN concept_tags TEXT;" 2>/dev/null || true
     _DB_INITIALIZED=1
 }
 
@@ -287,7 +299,7 @@ log_event() {
 # ── Memory functions (memories + memories_fts tables) ──
 
 memory_write() {
-    local id="$1" type="$2" title="$3" content="$4" keywords="${5:-}" project_scope="${6:-}" correction_count="${7:-1}"
+    local id="$1" type="$2" title="$3" content="$4" keywords="${5:-}" project_scope="${6:-}" correction_count="${7:-1}" anticipated_queries="${8:-}" concept_tags="${9:-}"
     local now
     now=$(date +%s)
     ensure_db
@@ -301,21 +313,21 @@ memory_write() {
     python3 -c "
 import sqlite3, sys
 db = sqlite3.connect('$WORKFLOW_DB')
-db.execute('''INSERT OR REPLACE INTO memories (id, type, title, content, keywords, project_scope, correction_count, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM memories WHERE id=?), ?), ?)''',
-(sys.argv[1], sys.argv[2], sys.argv[3], sys.stdin.read(), sys.argv[4], sys.argv[5] or None, int(sys.argv[6]), sys.argv[1], int(sys.argv[7]), int(sys.argv[7])))
+db.execute('''INSERT OR REPLACE INTO memories (id, type, title, content, keywords, anticipated_queries, concept_tags, project_scope, correction_count, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM memories WHERE id=?), ?), ?)''',
+(sys.argv[1], sys.argv[2], sys.argv[3], sys.stdin.read(), sys.argv[4], sys.argv[5] or None, sys.argv[6] or None, sys.argv[7] or None, int(sys.argv[8]), sys.argv[1], int(sys.argv[9]), int(sys.argv[9])))
 db.commit()
-" "$id" "$type" "$title" "$keywords" "$project_scope" "$correction_count" "$now" <<< "$content"
-    # Insert new FTS entry
+" "$id" "$type" "$title" "$keywords" "$anticipated_queries" "$concept_tags" "$project_scope" "$correction_count" "$now" <<< "$content"
+    # Insert new FTS entry (includes anticipated_queries for search)
     local new_rowid
     new_rowid=$(db_query "SELECT rowid FROM memories WHERE id='$(sql_escape "$id")';")
     python3 -c "
 import sqlite3, sys
 db = sqlite3.connect('$WORKFLOW_DB')
-db.execute('INSERT INTO memories_fts(rowid, title, content, keywords) VALUES (?, ?, ?, ?)',
-(int(sys.argv[1]), sys.argv[2], sys.stdin.read(), sys.argv[3]))
+db.execute('INSERT INTO memories_fts(rowid, title, content, keywords, anticipated_queries) VALUES (?, ?, ?, ?, ?)',
+(int(sys.argv[1]), sys.argv[2], sys.stdin.read(), sys.argv[3], sys.argv[4] or ''))
 db.commit()
-" "$new_rowid" "$title" "$keywords" <<< "$content"
+" "$new_rowid" "$title" "$keywords" "$anticipated_queries" <<< "$content"
 }
 
 memory_search() {

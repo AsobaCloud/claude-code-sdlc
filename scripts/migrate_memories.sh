@@ -62,8 +62,8 @@ for f in "$SHARED_MEM"/feedback_*.md; do
     # Generate keywords from the title
     keywords=$(echo "$name" | tr '[:upper:]' '[:lower:]' | tr -cs '[:alnum:]' ' ' | sed 's/^ //;s/ $//')
 
-    # Write to database
-    memory_write "$base" "$type" "$name" "$content_lines" "$keywords" "" "$correction_count"
+    # Write to database (anticipated_queries and concept_tags populated by enrich_memories.sh)
+    memory_write "$base" "$type" "$name" "$content_lines" "$keywords" "" "$correction_count" "" ""
     echo "OK ($correction_count): $name"
     MIGRATED=$((MIGRATED + 1))
 done
