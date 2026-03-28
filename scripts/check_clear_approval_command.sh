@@ -200,19 +200,36 @@ if [[ -n "$WORKFLOW_STATE" ]]; then
 ${WORKFLOW_STATE}"
 fi
 
-# ── Inject learned patterns from memories table ──
+# ── Inject learned patterns from memories table with tiered attention ──
 ensure_db
-PATTERNS=$(db_query "SELECT title || '|' || REPLACE(SUBSTR(content, 1, 200), CHAR(10), ' ') FROM memories ORDER BY correction_count DESC, access_count DESC, updated_at DESC LIMIT 5;" 2>/dev/null || true)
+INJECTED_IDS=""
+PATTERNS=$(db_query "SELECT id || '|' || title || '|' || REPLACE(SUBSTR(content, 1, 200), CHAR(10), ' ') || '|' || COALESCE(attention_score, 0.5) FROM memories ORDER BY (correction_count * 2.0) + (COALESCE(attention_score, 0.5) * 3.0) + (access_count * 0.1) DESC LIMIT 10;" 2>/dev/null || true)
 if [[ -n "$PATTERNS" ]]; then
-    LEARNED_BLOCK="── LEARNED PATTERNS (correction count) ──"
-    while IFS='|' read -r mem_title mem_rule; do
+    LEARNED_BLOCK="── LEARNED PATTERNS ──"
+    while IFS='|' read -r mem_id mem_title mem_rule mem_attn; do
         [[ -z "$mem_title" ]] && continue
-        LEARNED_BLOCK="${LEARNED_BLOCK}
+        # Tiered rendering based on attention_score
+        if (( $(echo "$mem_attn >= 0.7" | bc -l 2>/dev/null || echo 1) )); then
+            # HOT: full content snippet
+            LEARNED_BLOCK="${LEARNED_BLOCK}
 • ${mem_title}: ${mem_rule}"
+            INJECTED_IDS="${INJECTED_IDS}'$(sql_escape "$mem_id")',"
+        elif (( $(echo "$mem_attn >= 0.25" | bc -l 2>/dev/null || echo 1) )); then
+            # WARM: title only
+            LEARNED_BLOCK="${LEARNED_BLOCK}
+• ${mem_title}"
+            INJECTED_IDS="${INJECTED_IDS}'$(sql_escape "$mem_id")',"
+        fi
+        # COLD (<0.25): omitted
     done <<< "$PATTERNS"
     FULL_CONTEXT="${FULL_CONTEXT}
 
 ${LEARNED_BLOCK}"
+    # Boost attention_score and access_count for injected memories
+    if [[ -n "$INJECTED_IDS" ]]; then
+        INJECTED_IDS="${INJECTED_IDS%,}"  # trim trailing comma
+        db_exec "UPDATE memories SET access_count = access_count + 1, attention_score = MIN(1.0, COALESCE(attention_score, 0.5) + 0.15), last_accessed = CAST(strftime('%s','now') AS INTEGER) WHERE id IN ($INJECTED_IDS);" 2>/dev/null || true
+    fi
 fi
 
 # ── Output: allow with context injection ──

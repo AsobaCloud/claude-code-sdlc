@@ -122,6 +122,9 @@ SQL
     # Schema upgrade: add columns for SEP-018 (silently ignore if they already exist)
     sqlite3 "$WORKFLOW_DB" "ALTER TABLE memories ADD COLUMN anticipated_queries TEXT;" 2>/dev/null || true
     sqlite3 "$WORKFLOW_DB" "ALTER TABLE memories ADD COLUMN concept_tags TEXT;" 2>/dev/null || true
+    # Schema upgrade: add attention_score for SEP-019
+    sqlite3 "$WORKFLOW_DB" "ALTER TABLE memories ADD COLUMN attention_score REAL DEFAULT 0.5;" 2>/dev/null || true
+    sqlite3 "$WORKFLOW_DB" "UPDATE memories SET attention_score = 0.5 WHERE attention_score IS NULL;" 2>/dev/null || true
     _DB_INITIALIZED=1
 }
 
@@ -339,7 +342,7 @@ memory_search() {
 memory_top() {
     local limit="${1:-5}"
     ensure_db
-    db_query "SELECT id, title, content, type, correction_count FROM memories ORDER BY correction_count DESC, access_count DESC, updated_at DESC LIMIT $limit;"
+    db_query "SELECT id, title, content, type, correction_count, COALESCE(attention_score, 0.5) AS attn FROM memories ORDER BY (correction_count * 2.0) + (COALESCE(attention_score, 0.5) * 3.0) + (access_count * 0.1) DESC LIMIT $limit;"
 }
 
 memory_access() {
@@ -347,7 +350,7 @@ memory_access() {
     local now
     now=$(date +%s)
     ensure_db
-    db_exec "UPDATE memories SET access_count = access_count + 1, last_accessed = $now WHERE id='$(sql_escape "$id")';"
+    db_exec "UPDATE memories SET access_count = access_count + 1, last_accessed = $now, attention_score = MIN(1.0, COALESCE(attention_score, 0.5) + 0.15) WHERE id='$(sql_escape "$id")';"
 }
 
 # ── Plan query helpers (plans table) ──
