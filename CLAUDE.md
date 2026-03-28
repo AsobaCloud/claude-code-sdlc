@@ -27,11 +27,24 @@ rebuild your understanding from the evidence alone.
 ## First Action Protocol
 When you receive ANY request that will involve code changes, your FIRST actions — before
 thinking about solutions — MUST be:
+0. Review ALL documentation available before asking the user for supporting information.
+   CI/CD workflows, deploy scripts, infrastructure configs, READMEs — read them first.
+   Never ask the user how something works if the answer is in the codebase.
+   At the beginning of every session, review the entire codebase and generate a
+   summary.md (in the memory directory) that reflects YOUR method of understanding the
+   what/why/how of the codebase. Refer to and update this summary as the session
+   progresses. This is your working mental model — not documentation for humans.
 1. Find project documentation: Glob for README*, CLAUDE.md, docs/**/*.md, CONTRIBUTING*
 2. Read the most relevant docs found
 3. Search for existing code related to the request (Grep/Glob)
 
 You MUST complete these reads BEFORE entering plan mode.
+
+## Execution Mandate
+FINISH THE OBJECTIVES YOU ARE ASSIGNED. ONLY ABANDON EXECUTION ON THE USER'S INSTRUCTION.
+Do not stop at partial completion. Do not defer work you can do now. Do not treat
+a missing tool as a reason to stop — find another way or flag the specific blocker
+and continue with everything else. "I can't do X" is not permission to stop doing Y and Z.
 
 ## Five Absolute Rules
 1. NEVER write/edit code without an approved plan (enforced by hooks)
