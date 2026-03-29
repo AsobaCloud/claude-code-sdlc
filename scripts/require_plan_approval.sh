@@ -17,6 +17,25 @@ if [[ "$FILE_PATH" == *"/.claude/projects/"*"/memory/"* ]]; then
     exit 0
 fi
 
+# ── Summary gate: block edits until codebase summary exists (SEP-022) ──
+if state_exists summary_required; then
+    PROJECT_MEM_DIR="$HOME/.claude/projects/$(pwd | tr '/' '-' | sed 's/^-//')/memory"
+    SUMMARY_FILE="$PROJECT_MEM_DIR/summary.md"
+    if [[ ! -f "$SUMMARY_FILE" ]] || [[ -n "$(find "$SUMMARY_FILE" -mtime +1 2>/dev/null)" ]]; then
+        deny_tool "BLOCKED: Codebase summary required before editing.
+
+CLAUDE.md step 0 requires reviewing the codebase and generating summary.md before any code changes.
+
+NEXT ACTION: Read the project's README, docs, and key source files. Then write a summary to:
+  $SUMMARY_FILE
+
+The summary should reflect YOUR understanding of the what/why/how of this codebase.
+Once summary.md exists, editing will be unlocked."
+    else
+        state_remove summary_required
+    fi
+fi
+
 # ── Check approval ──
 if ! state_exists approved; then
     EXISTING_PLAN=""

@@ -200,6 +200,18 @@ if [[ -n "$WORKFLOW_STATE" ]]; then
 ${WORKFLOW_STATE}"
 fi
 
+# ── Mandatory codebase summary check (SEP-022) ──
+if state_exists summary_required; then
+    PROJECT_MEM_DIR="$HOME/.claude/projects/$(pwd | tr '/' '-' | sed 's/^-//')/memory"
+    FULL_CONTEXT="${FULL_CONTEXT}
+
+── MANDATORY: CODEBASE SUMMARY REQUIRED ──
+You MUST review the codebase and generate summary.md before any editing is allowed.
+Read: README*, CLAUDE.md, docs/**/*.md, key source files.
+Write summary to: ${PROJECT_MEM_DIR}/summary.md
+Editing is BLOCKED until this file exists."
+fi
+
 # ── Inject learned patterns from memories table with tiered attention ──
 ensure_db
 INJECTED_IDS=""

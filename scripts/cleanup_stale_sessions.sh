@@ -54,4 +54,11 @@ else
     generate_conversation_token >/dev/null 2>&1
 fi
 
+# Check if codebase summary exists and is recent (SEP-022)
+PROJECT_MEM_DIR="$HOME/.claude/projects/$(pwd | tr '/' '-' | sed 's/^-//')/memory"
+SUMMARY_FILE="$PROJECT_MEM_DIR/summary.md"
+if [[ ! -f "$SUMMARY_FILE" ]] || [[ -n "$(find "$SUMMARY_FILE" -mtime +1 2>/dev/null)" ]]; then
+    state_write summary_required "1"
+fi
+
 exit 0
