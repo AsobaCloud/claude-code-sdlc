@@ -232,6 +232,37 @@ ${LEARNED_BLOCK}"
     fi
 fi
 
+# ── Mandatory memory compliance: search against user prompt ──
+USER_PROMPT=$(echo "$HOOK_INPUT" | jq -r '.prompt // empty' 2>/dev/null)
+if [[ -n "$USER_PROMPT" && ${#USER_PROMPT} -gt 5 ]]; then
+    # Extract key terms (first 200 chars, alphanumeric words only)
+    SEARCH_TERMS=$(echo "$USER_PROMPT" | head -c 200 | tr -cs '[:alnum:]' ' ' | tr '[:upper:]' '[:lower:]' | sed 's/^ //;s/ $//')
+    if [[ -n "$SEARCH_TERMS" ]]; then
+        PROMPT_MATCHES=$(db_query "SELECT m.id, m.title, REPLACE(SUBSTR(m.content, 1, 150), CHAR(10), ' '), m.correction_count FROM memories m JOIN memories_fts f ON m.rowid = f.rowid WHERE memories_fts MATCH '$(sql_escape "$SEARCH_TERMS")' ORDER BY m.correction_count DESC LIMIT 3;" 2>/dev/null || true)
+        if [[ -n "$PROMPT_MATCHES" ]]; then
+            COMPLIANCE_BLOCK="── MANDATORY MEMORY COMPLIANCE ──
+The following learned corrections are relevant to your current request.
+You MUST demonstrate compliance with each before proceeding."
+            COMPLIANCE_IDS=""
+            while IFS='|' read -r c_id c_title c_rule c_count; do
+                [[ -z "$c_title" ]] && continue
+                # Skip if already in the static LEARNED PATTERNS block
+                if [[ "${INJECTED_IDS:-}" == *"'$c_id'"* ]]; then continue; fi
+                COMPLIANCE_BLOCK="${COMPLIANCE_BLOCK}
+• [${c_count}x] ${c_title}: ${c_rule}"
+                COMPLIANCE_IDS="${COMPLIANCE_IDS}'$(sql_escape "$c_id")',"
+            done <<< "$PROMPT_MATCHES"
+            if [[ -n "$COMPLIANCE_IDS" ]]; then
+                FULL_CONTEXT="${FULL_CONTEXT}
+
+${COMPLIANCE_BLOCK}"
+                COMPLIANCE_IDS="${COMPLIANCE_IDS%,}"
+                db_exec "UPDATE memories SET access_count = access_count + 1, attention_score = MIN(1.0, COALESCE(attention_score, 0.5) + 0.15), last_accessed = CAST(strftime('%s','now') AS INTEGER) WHERE id IN ($COMPLIANCE_IDS);" 2>/dev/null || true
+            fi
+        fi
+    fi
+fi
+
 # ── Output: allow with context injection ──
 jq -n --arg ctx "$FULL_CONTEXT" '{
     "hookSpecificOutput": {
